@@ -1,0 +1,42 @@
+# Git files
+.git
+.gitignore
+
+# Python cache and virtual environments
+__pycache__
+*.py[oc]
+.venv
+*.egg-info
+build/
+dist/
+wheels/
+
+# Environment files
+.env
+
+# Data files (mounted as volume)
+data/
+
+# Frontend files (built separately)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+*.md
+!README.md
+
+# Images
+*.jpg
+*.png
+*.gif
+
+# Test files
+test_*.py
+*_test.py

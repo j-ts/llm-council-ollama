@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: llm-council-backend
+    ports:
+      - "8001:8001"
+    environment:
+      # OpenRouter API key - required for LLM queries
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    volumes:
+      # Persist conversation data
+      - ./data:/app/data
+      # Mount backend code for development (hot reload)
+      - ./backend:/app/backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: llm-council-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      # Vite needs this to accept connections from outside container
+      - VITE_API_URL=http://localhost:8001
+    volumes:
+      # Mount source for hot reload during development
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      # Exclude node_modules to use container's installation
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  # Named volume for conversation data persistence
+  data:
