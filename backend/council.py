@@ -6,39 +6,54 @@ from .config import config_manager
 from .providers import ProviderFactory, ModelProvider
 
 async def query_models_parallel(
-    provider: ModelProvider,
-    models: List[str],
+    model_configs: List[Dict[str, Any]],
+    providers_config: Dict[str, Any],
     messages: List[Dict[str, str]]
 ) -> Dict[str, Optional[Dict[str, Any]]]:
     """
-    Query multiple models in parallel using the given provider.
+    Query multiple models in parallel, each with their own provider.
     """
-    async def query_safe(model):
-        return await provider.query(model, messages)
+    async def query_safe(model_config):
+        try:
+            provider = ProviderFactory.get_provider_for_model(model_config, providers_config)
+            return await provider.query(model_config["name"], messages)
+        except Exception as e:
+            print(f"Error querying model {model_config.get('name')}: {e}")
+            return None
 
-    tasks = [query_safe(model) for model in models]
-    responses = await asyncio.gather(*tasks)
-    return {model: response for model, response in zip(models, responses)}
+    tasks = [query_safe(model_config) for model_config in model_configs]
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Map responses by model name
+    result = {}
+    for model_config, response in zip(model_configs, responses):
+        if isinstance(response, Exception):
+            print(f"Exception for model {model_config.get('name')}: {response}")
+            result[model_config["name"]] = None
+        else:
+            result[model_config["name"]] = response
+    
+    return result
 
 async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]], float, Dict[str, str]]:
     """
     Stage 1: Collect individual responses from all council models.
     """
     config = config_manager.get_config()
-    provider = ProviderFactory.get_provider(config)
+    providers_config = config.get("providers", {})
     council_models = config.get("council_models", [])
 
     messages = [{"role": "user", "content": user_query}]
 
-    # Query all models in parallel
-    responses = await query_models_parallel(provider, council_models, messages)
+    # Query all models in parallel (each with their own provider)
+    responses = await query_models_parallel(council_models, providers_config, messages)
 
     # Format results and collect costs + generation IDs
     stage1_results = []
     total_cost = 0.0
     generation_ids = {}
     
-    for model, response in responses.items():
+    for model_name, response in responses.items():
         if response is not None:
             # Extract cost and generation ID
             model_cost = 0.0
@@ -53,10 +68,10 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
                 total_cost += model_cost
                 
                 if gen_id:
-                    generation_ids[f"stage1_{model}"] = gen_id
+                    generation_ids[f"stage1_{model_name}"] = gen_id
             
             stage1_results.append({
-                "model": model,
+                "model": model_name,
                 "response": response.get('content', ''),
                 "cost": model_cost,
                 "cost_status": cost_status
@@ -73,7 +88,7 @@ async def stage2_collect_rankings(
     Stage 2: Each model ranks the anonymized responses.
     """
     config = config_manager.get_config()
-    provider = ProviderFactory.get_provider(config)
+    providers_config = config.get("providers", {})
     council_models = config.get("council_models", [])
 
     # Create anonymized labels for responses (Response A, Response B, etc.)
@@ -125,7 +140,7 @@ Now provide your evaluation and ranking:"""
     messages = [{"role": "user", "content": ranking_prompt}]
 
     # Get rankings from all council models in parallel
-    responses = await query_models_parallel(provider, council_models, messages)
+    responses = await query_models_parallel(council_models, providers_config, messages)
 
     # Format results and collect costs + generation IDs
     stage2_results = []
@@ -172,8 +187,9 @@ async def stage3_synthesize_final(
     Stage 3: Chairman synthesizes final response.
     """
     config = config_manager.get_config()
-    provider = ProviderFactory.get_provider(config)
-    chairman_model = config.get("chairman_model")
+    providers_config = config.get("providers", {})
+    chairman_model_config = config.get("chairman_model", {})
+    chairman_model_name = chairman_model_config.get("name") if isinstance(chairman_model_config, dict) else chairman_model_config
 
     # Build comprehensive context for chairman
     stage1_text = "\n\n".join([
@@ -205,13 +221,18 @@ Provide a clear, well-reasoned final answer that represents the council's collec
 
     messages = [{"role": "user", "content": chairman_prompt}]
 
-    # Query the chairman model
-    response = await provider.query(chairman_model, messages)
+    # Query the chairman model with its specific provider
+    try:
+        provider = ProviderFactory.get_provider_for_model(chairman_model_config, providers_config)
+        response = await provider.query(chairman_model_name, messages)
+    except Exception as e:
+        print(f"Error querying chairman model: {e}")
+        response = None
 
     if response is None:
         # Fallback if chairman fails
         return {
-            "model": chairman_model,
+            "model": chairman_model_name,
             "response": "Error: Unable to generate final synthesis."
         }, 0.0, {}
 
@@ -228,10 +249,10 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     
     generation_ids = {}
     if gen_id:
-        generation_ids[f"stage3_{chairman_model}"] = gen_id
+        generation_ids[f"stage3_{chairman_model_name}"] = gen_id
 
     return {
-        "model": chairman_model,
+        "model": chairman_model_name,
         "response": response.get('content', ''),
         "cost": cost,
         "cost_status": cost_status
@@ -310,20 +331,23 @@ async def generate_conversation_title(user_query: str) -> str:
     Generate a short title for a conversation based on the first user message.
     """
     config = config_manager.get_config()
-    provider = ProviderFactory.get_provider(config)
+    providers_config = config.get("providers", {})
     
-    # Use a cheap model for title generation
-    # For OpenRouter, we use gemini-2.5-flash
-    # For Ollama, we use the chairman model (or first available)
-    # For OpenAI, we use gpt-3.5-turbo or similar if available, or just the chairman
+    # Use the chairman model for title generation
+    chairman_model_config = config.get("chairman_model", {})
     
-    title_model = "google/gemini-2.5-flash" # Default for OpenRouter
+    # Handle both old and new formats
+    if isinstance(chairman_model_config, dict):
+        title_model_config = chairman_model_config
+        title_model_name = chairman_model_config.get("name", "")
+    else:
+        # Old format: chairman_model is a string
+        title_model_name = chairman_model_config
+        # Assume openrouter provider for legacy configs
+        title_model_config = {"name": title_model_name, "provider": "openrouter"}
     
-    if config.get("provider") == "ollama":
-        # Use chairman or first council model
-        title_model = config.get("chairman_model") or (config.get("council_models") or ["llama2"])[0]
-    elif config.get("provider") == "openai":
-        title_model = "gpt-3.5-turbo" # Assumption
+    if not title_model_name:
+        return "New Conversation"
         
     title_prompt = f"""Generate a very short title (3-5 words maximum) that summarizes the following question.
 The title should be concise and descriptive. Do not use quotes or punctuation in the title.
@@ -334,7 +358,12 @@ Title:"""
 
     messages = [{"role": "user", "content": title_prompt}]
 
-    response = await provider.query(title_model, messages, timeout=30.0)
+    try:
+        provider = ProviderFactory.get_provider_for_model(title_model_config, providers_config)
+        response = await provider.query(title_model_name, messages, timeout=30.0)
+    except Exception as e:
+        print(f"Error generating title: {e}")
+        return "New Conversation"
 
     if response is None:
         return "New Conversation"

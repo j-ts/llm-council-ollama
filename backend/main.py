@@ -302,29 +302,57 @@ async def update_config(config: Dict[str, Any]):
     return config_manager.update_config(config)
 
 
-@app.get("/api/models/{provider}")
-async def list_models(provider: str):
-    """List available models for a provider."""
+@app.get("/api/models/all")
+async def list_all_models():
+    """List available models from all configured providers."""
     from .config import config_manager
     from .providers import ProviderFactory
     
-    # Create a temporary config to get the provider instance
-    # We use the current config but override the provider type
-    # This allows listing models for a provider before switching to it
-    current_config = config_manager.get_config().copy()
-    current_config["provider"] = provider
+    config = config_manager.get_config()
+    providers_config = config.get("providers", {})
     
-    # For OpenAI/OpenRouter, we might need keys from the request if they aren't saved yet
-    # But for now, let's assume we use what's in the config or defaults
+    all_models = {}
+    
+    # Get all configured providers
+    providers = ProviderFactory.get_all_providers(providers_config)
+    
+    # Query each provider for its models
+    for provider_name, provider_instance in providers.items():
+        try:
+            models = await provider_instance.list_models()
+            all_models[provider_name] = models
+        except Exception as e:
+            print(f"Error listing models for {provider_name}: {e}")
+            all_models[provider_name] = []
+    
+    return {"models": all_models}
+
+
+@app.get("/api/models/{provider}")
+async def list_models(provider: str):
+    """List available models for a specific provider."""
+    from .config import config_manager
+    from .providers import ProviderFactory
+    
+    config = config_manager.get_config()
+    providers_config = config.get("providers", {})
+    
+    if provider not in providers_config:
+        return {"models": []}
+    
+    # Create a dummy model config to get the provider instance
+    dummy_model_config = {"name": "dummy", "provider": provider}
     
     try:
-        provider_instance = ProviderFactory.get_provider(current_config)
+        provider_instance = ProviderFactory.get_provider_for_model(dummy_model_config, providers_config)
         models = await provider_instance.list_models()
         return {"models": models}
     except Exception as e:
+        print(f"Error listing models for {provider}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+

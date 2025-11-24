@@ -4,9 +4,11 @@ Model providers for LLM Council.
 
 import abc
 import os
+import json
 import httpx
 from typing import List, Dict, Any, Optional
 from .openrouter import query_model as openrouter_query_model
+
 
 class ModelProvider(abc.ABC):
     """Abstract base class for model providers."""
@@ -145,8 +147,85 @@ class OpenAIProvider(ModelProvider):
         return []
 
 class ProviderFactory:
+    _provider_cache: Dict[str, ModelProvider] = {}
+    
+    @staticmethod
+    def get_provider_for_model(model_config: Dict[str, Any], providers_config: Dict[str, Any]) -> ModelProvider:
+        """
+        Get the appropriate provider for a specific model configuration.
+        
+        Args:
+            model_config: Dict with 'name' and 'provider' keys
+            providers_config: Dict with provider configurations
+        
+        Returns:
+            Configured ModelProvider instance
+        """
+        provider_name = model_config.get("provider")
+        
+        # Create a cache key based on provider name and config
+        provider_config = providers_config.get(provider_name, {})
+        cache_key = f"{provider_name}:{json.dumps(provider_config, sort_keys=True)}"
+        
+        # Return cached provider if available
+        if cache_key in ProviderFactory._provider_cache:
+            return ProviderFactory._provider_cache[cache_key]
+        
+        # Create new provider instance
+        if provider_name == "ollama":
+            provider = OllamaProvider(base_url=provider_config.get("base_url", "http://localhost:11434"))
+        elif provider_name == "openai":
+            provider = OpenAIProvider(
+                api_key=provider_config.get("api_key", ""),
+                base_url=provider_config.get("base_url", "https://api.openai.com/v1")
+            )
+        elif provider_name == "openrouter":
+            provider = OpenRouterProvider(api_key=provider_config.get("api_key", ""))
+        else:
+            raise ValueError(f"Unknown provider: {provider_name}")
+        
+        # Cache the provider
+        ProviderFactory._provider_cache[cache_key] = provider
+        return provider
+    
+    @staticmethod
+    def get_all_providers(providers_config: Dict[str, Any]) -> Dict[str, ModelProvider]:
+        """
+        Get all configured providers.
+        
+        Args:
+            providers_config: Dict with provider configurations
+        
+        Returns:
+            Dict mapping provider names to provider instances
+        """
+        providers = {}
+        
+        # Only create providers that have valid configurations
+        if "ollama" in providers_config:
+            providers["ollama"] = OllamaProvider(
+                base_url=providers_config["ollama"].get("base_url", "http://localhost:11434")
+            )
+        
+        if "openrouter" in providers_config and providers_config["openrouter"].get("api_key"):
+            providers["openrouter"] = OpenRouterProvider(
+                api_key=providers_config["openrouter"]["api_key"]
+            )
+        
+        if "openai" in providers_config and providers_config["openai"].get("api_key"):
+            providers["openai"] = OpenAIProvider(
+                api_key=providers_config["openai"]["api_key"],
+                base_url=providers_config["openai"].get("base_url", "https://api.openai.com/v1")
+            )
+        
+        return providers
+    
     @staticmethod
     def get_provider(config: Dict[str, Any]) -> ModelProvider:
+        """
+        Legacy method for backward compatibility.
+        Gets a single provider based on old config format.
+        """
         provider_type = config.get("provider", "openrouter")
         
         if provider_type == "ollama":
@@ -159,3 +238,4 @@ class ProviderFactory:
         else:
             # Default to OpenRouter
             return OpenRouterProvider(api_key=config.get("openrouter_api_key", ""))
+

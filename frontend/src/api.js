@@ -169,6 +169,12 @@ export const api = {
     return response.json();
   },
 
+  async listAllModels() {
+    const response = await fetch(`${API_BASE}/api/models/all`);
+    if (!response.ok) throw new Error('Failed to list all models');
+    return response.json();
+  },
+
   /**
    * Delete a conversation.
    * @param {string} conversationId - The conversation ID

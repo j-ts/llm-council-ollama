@@ -69,24 +69,93 @@ class ConfigManager:
         self.config_file = config_file
         self._config = self._load_config()
 
+    def _migrate_old_config(self, old_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Migrate old single-provider config to new multi-provider format."""
+        # Check if this is already the new format
+        if "providers" in old_config:
+            return old_config
+        
+        print("Migrating configuration to new multi-provider format...")
+        
+        # Extract old provider info
+        old_provider = old_config.get("provider", "openrouter")
+        
+        # Build new providers config
+        providers = {
+            "ollama": {
+                "base_url": old_config.get("ollama_base_url", "http://localhost:11434")
+            },
+            "openrouter": {
+                "api_key": old_config.get("openrouter_api_key", "")
+            },
+            "openai": {
+                "base_url": old_config.get("openai_base_url", "https://api.openai.com/v1"),
+                "api_key": old_config.get("openai_api_key", "")
+            }
+        }
+        
+        # Convert council_models from list of strings to list of dicts
+        old_council_models = old_config.get("council_models", [])
+        council_models = []
+        for model_name in old_council_models:
+            council_models.append({
+                "name": model_name,
+                "provider": old_provider
+            })
+        
+        # Convert chairman_model from string to dict
+        old_chairman = old_config.get("chairman_model", "")
+        chairman_model = {
+            "name": old_chairman,
+            "provider": old_provider
+        }
+        
+        new_config = {
+            "providers": providers,
+            "council_models": council_models,
+            "chairman_model": chairman_model
+        }
+        
+        # Save the migrated config
+        self._config = new_config
+        self._save_config()
+        print("Configuration migration complete!")
+        
+        return new_config
+
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file or return defaults."""
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r') as f:
-                    return json.load(f)
+                    loaded_config = json.load(f)
+                    # Migrate if necessary
+                    return self._migrate_old_config(loaded_config)
             except Exception as e:
                 print(f"Error loading config file: {e}")
         
-        # Default configuration
+        # Default configuration (new format)
         return {
-            "provider": "openrouter",
-            "openrouter_api_key": OPENROUTER_API_KEY,
-            "ollama_base_url": "http://localhost:11434",
-            "openai_api_key": "",
-            "openai_base_url": "https://api.openai.com/v1",
-            "council_models": COUNCIL_MODELS,
-            "chairman_model": CHAIRMAN_MODEL
+            "providers": {
+                "ollama": {
+                    "base_url": "http://localhost:11434"
+                },
+                "openrouter": {
+                    "api_key": OPENROUTER_API_KEY or ""
+                },
+                "openai": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key": ""
+                }
+            },
+            "council_models": [
+                {"name": model, "provider": "openrouter"}
+                for model in COUNCIL_MODELS
+            ],
+            "chairman_model": {
+                "name": CHAIRMAN_MODEL,
+                "provider": "openrouter"
+            }
         }
 
     def get_config(self) -> Dict[str, Any]:
