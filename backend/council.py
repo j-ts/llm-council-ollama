@@ -50,23 +50,25 @@ async def query_models_parallel(
     async def query_safe(model_config):
         try:
             provider = ProviderFactory.get_provider_for_model(model_config, providers_config)
-            return await provider.query(model_config["name"], messages)
+            response = await provider.query(model_config["name"], messages)
+            return {"response": response, "error": None}
         except Exception as e:
-            print(f"Error querying model {model_config.get('name')}: {e}")
-            return None
+            error_message = str(e)
+            print(f"Error querying model {model_config.get('name')}: {error_message}")
+            return {"response": None, "error": error_message}
 
     tasks = [query_safe(model_config) for model_config in model_configs]
-    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    responses = await asyncio.gather(*tasks)
     
     # Map responses by stable model key to avoid collisions across providers/configs
     result = {}
     for model_config, response in zip(model_configs, responses):
         key = build_model_key(model_config)
-        if isinstance(response, Exception):
-            print(f"Exception for model {model_config.get('name')}: {response}")
-            result[key] = {"response": None, "model_config": model_config}
-        else:
-            result[key] = {"response": response, "model_config": model_config}
+        result[key] = {
+            "response": response.get("response") if isinstance(response, dict) else None,
+            "error": response.get("error") if isinstance(response, dict) else "Unknown error",
+            "model_config": model_config
+        }
     
     return result
 
@@ -90,6 +92,7 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
     
     for model_key, data in responses.items():
         response = data.get("response")
+        error = data.get("error")
         model_config = data.get("model_config", {})
 
         if response is not None:
@@ -116,7 +119,20 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
                 "openai_config_name": model_config.get("openai_config_name"),
                 "response": response.get('content', ''),
                 "cost": model_cost,
-                "cost_status": cost_status
+                "cost_status": cost_status,
+                "error": None
+            })
+        else:
+            stage1_results.append({
+                "model_id": model_key,
+                "model": model_config.get("name", model_key),
+                "model_display": build_model_display_name(model_config),
+                "provider": model_config.get("provider"),
+                "openai_config_name": model_config.get("openai_config_name"),
+                "response": "",
+                "cost": 0.0,
+                "cost_status": "error",
+                "error": error or "Failed to query model"
             })
 
     return stage1_results, total_cost, generation_ids
@@ -133,8 +149,12 @@ async def stage2_collect_rankings(
     providers_config = config.get("providers", {})
     council_models = config.get("council_models", [])
 
+    valid_stage1_results = [result for result in stage1_results if not result.get("error")]
+    if not valid_stage1_results:
+        return [], {}, 0.0, {}
+
     # Create anonymized labels for responses (Response A, Response B, etc.)
-    labels = [chr(65 + i) for i in range(len(stage1_results))]  # A, B, C, ...
+    labels = [chr(65 + i) for i in range(len(valid_stage1_results))]  # A, B, C, ...
 
     # Create mapping from label to model name
     label_to_model = {
@@ -145,13 +165,13 @@ async def stage2_collect_rankings(
             "provider": result.get("provider"),
             "openai_config_name": result.get("openai_config_name"),
         }
-        for label, result in zip(labels, stage1_results)
+        for label, result in zip(labels, valid_stage1_results)
     }
 
     # Build the ranking prompt
     responses_text = "\n\n".join([
         f"Response {label}:\n{result['response']}"
-        for label, result in zip(labels, stage1_results)
+        for label, result in zip(labels, valid_stage1_results)
     ])
 
     ranking_prompt = f"""You are evaluating different responses to the following question:
@@ -197,6 +217,7 @@ Now provide your evaluation and ranking:"""
     
     for model_key, data in responses.items():
         response = data.get("response")
+        error = data.get("error")
         model_config = data.get("model_config", {})
 
         if response is not None:
@@ -227,7 +248,21 @@ Now provide your evaluation and ranking:"""
                 "ranking": full_text,
                 "parsed_ranking": parsed,
                 "cost": model_cost,
-                "cost_status": cost_status
+                "cost_status": cost_status,
+                "error": None
+            })
+        else:
+            stage2_results.append({
+                "model_id": model_key,
+                "model": model_config.get("name", model_key),
+                "model_display": build_model_display_name(model_config),
+                "provider": model_config.get("provider"),
+                "openai_config_name": model_config.get("openai_config_name"),
+                "ranking": "",
+                "parsed_ranking": [],
+                "cost": 0.0,
+                "cost_status": "error",
+                "error": error or "Failed to query model"
             })
 
     return stage2_results, label_to_model, total_cost, generation_ids
@@ -252,11 +287,13 @@ async def stage3_synthesize_final(
     stage1_text = "\n\n".join([
         f"Model: {result.get('model_display', result.get('model'))}\nResponse: {result['response']}"
         for result in stage1_results
+        if not result.get("error")
     ])
 
     stage2_text = "\n\n".join([
         f"Model: {result.get('model_display', result.get('model'))}\nRanking: {result['ranking']}"
         for result in stage2_results
+        if not result.get("error")
     ])
 
     chairman_prompt = f"""You are the Chairman of an LLM Council. Multiple AI models have provided responses to a user's question, and then ranked each other's responses.
@@ -279,20 +316,26 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     messages = [{"role": "user", "content": chairman_prompt}]
 
     # Query the chairman model with its specific provider
+    error_message = None
     try:
         provider = ProviderFactory.get_provider_for_model(chairman_model_config, providers_config)
         response = await provider.query(chairman_model_name, messages)
     except Exception as e:
         print(f"Error querying chairman model: {e}")
         response = None
+        error_message = str(e)
 
     if response is None:
+        fallback_message = "Error: Unable to generate final synthesis."
+        if error_message:
+            fallback_message = f"{fallback_message} ({error_message})"
         # Fallback if chairman fails
         return {
             "model_id": chairman_model_id,
             "model": chairman_model_name,
             "model_display": chairman_model_display,
-            "response": "Error: Unable to generate final synthesis."
+            "response": fallback_message,
+            "error": error_message
         }, 0.0, {}
 
     # Extract cost and generation ID
@@ -315,6 +358,7 @@ Provide a clear, well-reasoned final answer that represents the council's collec
         "model": chairman_model_name,
         "model_display": chairman_model_display,
         "response": response.get('content', ''),
+        "error": None,
         "cost": cost,
         "cost_status": cost_status
     }, cost, generation_ids
@@ -466,13 +510,31 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict, flo
     stage1_results, stage1_cost, stage1_gen_ids = await stage1_collect_responses(user_query)
     total_cost += stage1_cost
 
-    # If no models responded successfully, return error
-    if not stage1_results:
-        return [], [], {
+    any_success = any(not result.get("error") for result in stage1_results)
+    if not any_success:
+        stage2_results: List[Dict[str, Any]] = []
+        stage3_result = {
+            "model_id": "error",
             "model": "error",
             "model_display": "error",
-            "response": "All models failed to respond. Please try again."
-        }, {}, 0.0
+            "response": "All council models failed to respond. Check your provider settings or pull the missing Ollama models.",
+            "error": "All models failed to respond.",
+            "cost": 0.0,
+            "cost_status": "error"
+        }
+        metadata = {
+            "label_to_model": {},
+            "aggregate_rankings": [],
+            "stage_costs": {
+                "stage1": stage1_cost,
+                "stage2": 0.0,
+                "stage3": 0.0,
+                "total": total_cost,
+                "status": "estimated"
+            },
+            "generation_ids": {**stage1_gen_ids}
+        }
+        return stage1_results, stage2_results, stage3_result, metadata, total_cost
 
     # Stage 2: Collect rankings
     stage2_results, label_to_model, stage2_cost, stage2_gen_ids = await stage2_collect_rankings(user_query, stage1_results)

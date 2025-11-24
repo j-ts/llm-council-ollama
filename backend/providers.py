@@ -74,9 +74,17 @@ class OllamaProvider(ModelProvider):
                         "cost_status": "final"
                     }
                 }
+        except httpx.HTTPStatusError as e:
+            detail = self._extract_error_detail(e.response)
+            if e.response and e.response.status_code == 404:
+                detail = f"{detail} (pull the model with 'ollama pull {model}')"
+            raise RuntimeError(
+                f"Ollama error ({e.response.status_code if e.response else 'n/a'}) for model '{model}': {detail}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Unable to reach Ollama at {self.base_url}: {e}") from e
         except Exception as e:
-            print(f"Error querying Ollama model {model}: {e}")
-            return None
+            raise RuntimeError(f"Ollama request failed for model '{model}': {e}") from e
 
     async def list_models(self) -> List[str]:
         url = f"{self.base_url}/api/tags"
@@ -89,6 +97,20 @@ class OllamaProvider(ModelProvider):
         except Exception as e:
             print(f"Error listing Ollama models: {e}")
         return []
+
+    @staticmethod
+    def _extract_error_detail(response: Optional[httpx.Response]) -> str:
+        """Best-effort extraction of error detail from Ollama."""
+        if response is None:
+            return "Unknown error"
+        try:
+            data = response.json()
+            if isinstance(data, dict) and data.get("error"):
+                return data["error"]
+        except ValueError:
+            pass
+        text = response.text.strip()
+        return text or "Unknown error"
 
 class OpenAIProvider(ModelProvider):
     """Provider for OpenAI compatible APIs (Direct)."""
@@ -127,9 +149,15 @@ class OpenAIProvider(ModelProvider):
                         "cost_status": "unknown"
                     }
                 }
+        except httpx.HTTPStatusError as e:
+            detail = self._extract_error_detail(e.response)
+            raise RuntimeError(
+                f"OpenAI-compatible error ({e.response.status_code if e.response else 'n/a'}) for model '{model}': {detail}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Unable to reach OpenAI-compatible endpoint at {self.base_url}: {e}") from e
         except Exception as e:
-            print(f"Error querying OpenAI model {model}: {e}")
-            return None
+            raise RuntimeError(f"OpenAI-compatible request failed for model '{model}': {e}") from e
 
     async def list_models(self) -> List[str]:
         # Listing models from OpenAI compatible endpoints
@@ -145,6 +173,24 @@ class OpenAIProvider(ModelProvider):
         except Exception as e:
             print(f"Error listing OpenAI models: {e}")
         return []
+
+    @staticmethod
+    def _extract_error_detail(response: Optional[httpx.Response]) -> str:
+        """Best-effort extraction of error detail from OpenAI compatible APIs."""
+        if response is None:
+            return "Unknown error"
+        try:
+            data = response.json()
+            if isinstance(data, dict):
+                if data.get("error"):
+                    err = data["error"]
+                    if isinstance(err, dict):
+                        return err.get("message") or str(err)
+                    return str(err)
+        except ValueError:
+            pass
+        text = response.text.strip()
+        return text or "Unknown error"
 
 class ProviderFactory:
     _provider_cache: Dict[str, ModelProvider] = {}

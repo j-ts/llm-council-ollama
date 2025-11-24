@@ -71,57 +71,78 @@ class ConfigManager:
 
     def _migrate_old_config(self, old_config: Dict[str, Any]) -> Dict[str, Any]:
         """Migrate old single-provider config to new multi-provider format."""
-        # Check if this is already the new format
-        if "providers" in old_config:
-            return old_config
         
-        print("Migrating configuration to new multi-provider format...")
-        
-        # Extract old provider info
-        old_provider = old_config.get("provider", "openrouter")
-        
-        # Build new providers config
-        providers = {
-            "ollama": {
-                "base_url": old_config.get("ollama_base_url", "http://localhost:11434")
-            },
-            "openrouter": {
-                "api_key": old_config.get("openrouter_api_key", "")
-            },
-            "openai": {
-                "base_url": old_config.get("openai_base_url", "https://api.openai.com/v1"),
-                "api_key": old_config.get("openai_api_key", "")
+        # 1. Migrate from single-provider (root level) to multi-provider (providers dict)
+        if "providers" not in old_config:
+            print("Migrating configuration to new multi-provider format...")
+            
+            # Extract old provider info
+            old_provider = old_config.get("provider", "openrouter")
+            
+            # Build new providers config
+            providers = {
+                "ollama": {
+                    "base_url": old_config.get("ollama_base_url", "http://localhost:11434")
+                },
+                "openrouter": {
+                    "api_key": old_config.get("openrouter_api_key", "")
+                },
+                "openai": [
+                    {
+                        "name": "Default",
+                        "base_url": old_config.get("openai_base_url", "https://api.openai.com/v1"),
+                        "api_key": old_config.get("openai_api_key", "")
+                    }
+                ]
             }
-        }
-        
-        # Convert council_models from list of strings to list of dicts
-        old_council_models = old_config.get("council_models", [])
-        council_models = []
-        for model_name in old_council_models:
-            council_models.append({
-                "name": model_name,
+            
+            # Convert council_models from list of strings to list of dicts
+            old_council_models = old_config.get("council_models", [])
+            council_models = []
+            for model_name in old_council_models:
+                council_models.append({
+                    "name": model_name,
+                    "provider": old_provider
+                })
+            
+            # Convert chairman_model from string to dict
+            old_chairman = old_config.get("chairman_model", "")
+            chairman_model = {
+                "name": old_chairman,
                 "provider": old_provider
-            })
-        
-        # Convert chairman_model from string to dict
-        old_chairman = old_config.get("chairman_model", "")
-        chairman_model = {
-            "name": old_chairman,
-            "provider": old_provider
-        }
-        
-        new_config = {
-            "providers": providers,
-            "council_models": council_models,
-            "chairman_model": chairman_model
-        }
-        
-        # Save the migrated config
-        self._config = new_config
-        self._save_config()
-        print("Configuration migration complete!")
-        
-        return new_config
+            }
+            
+            new_config = {
+                "providers": providers,
+                "council_models": council_models,
+                "chairman_model": chairman_model
+            }
+            
+            # Save the migrated config
+            self._config = new_config
+            self._save_config()
+            print("Configuration migration complete!")
+            return new_config
+
+        # 2. Migrate from single OpenAI config (dict) to multiple OpenAI configs (list)
+        # This handles the migration for users who are already on the multi-provider schema
+        # but have the old "openai": {...} dict instead of "openai": [...] list
+        if isinstance(old_config["providers"].get("openai"), dict):
+            print("Migrating OpenAI config to multi-instance format...")
+            old_openai = old_config["providers"]["openai"]
+            old_config["providers"]["openai"] = [
+                {
+                    "name": "Default",
+                    "base_url": old_openai.get("base_url", "https://api.openai.com/v1"),
+                    "api_key": old_openai.get("api_key", "")
+                }
+            ]
+            self._config = old_config
+            self._save_config()
+            print("OpenAI config migration complete!")
+            return old_config
+
+        return old_config
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file or return defaults."""
@@ -143,10 +164,13 @@ class ConfigManager:
                 "openrouter": {
                     "api_key": OPENROUTER_API_KEY or ""
                 },
-                "openai": {
-                    "base_url": "https://api.openai.com/v1",
-                    "api_key": ""
-                }
+                "openai": [
+                    {
+                        "name": "Default",
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key": ""
+                    }
+                ]
             },
             "council_models": [
                 {"name": model, "provider": "openrouter"}
