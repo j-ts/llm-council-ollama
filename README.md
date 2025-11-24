@@ -28,6 +28,8 @@ This project was 99% *vibe‑coded* as a fun Saturday hack while exploring side�
 
 ## 🎨 New Features (Recent Changes)
 
+- **Multi-Provider Support** – Now supports **Local Ollama**, **OpenRouter**, and **Direct OpenAI/Anthropic** connections.
+- **Settings UI** – Configure providers, API keys, and model selection directly from the UI.
 - **Dark Theme** – A sleek dark UI is now the default.
 - **Sidebar Background Fix** – The sidebar now respects the dark theme, fixing the white background issue.
 - **Free OpenRouter Models** – The default configuration now uses free‑tier OpenRouter models, lowering the barrier to try the app out of the box.
@@ -62,18 +64,22 @@ OPENROUTER_API_KEY=sk-or-v1-...
 ```
 Get your API key at [openrouter.ai](https://openrouter.ai/).
 
-### 3. (Optional) Configure Models
-Edit `backend/config.py` to customise the council. The default now points to free OpenRouter models:
-```python
-COUNCIL_MODELS = [
-    "openrouter/anthropic/claude-2.1",
-    "openrouter/google/gemini-pro",
-    "openrouter/meta/llama-3.1-8b",
-    "openrouter/mistralai/mistral-7b",
-]
+### 3. Configure Models
+You can now configure models directly in the application UI!
+1. Click "Settings" in the sidebar.
+2. Select your provider (OpenRouter, Ollama, or OpenAI Compatible).
+3. Enter API keys or Base URLs.
+4. Add/Remove models for the Council and select a Chairman.
 
-CHAIRMAN_MODEL = "openrouter/google/gemini-pro"
-```
+**Default Configuration:**
+The app starts with a default configuration using free OpenRouter models. You can override this in the UI.
+
+**Local Ollama Setup:**
+1. Ensure Ollama is running (`ollama serve`).
+2. Pull models you want to use (e.g., `ollama pull mistral`, `ollama pull llama3`).
+3. In the app Settings, select "Ollama (Local)".
+4. The Base URL defaults to `http://localhost:11434`.
+5. The "Council Models" dropdown will populate with your local models.
 
 ### 4. (Optional) Docker Deployment
 A simple Dockerfile is provided. To build and run:

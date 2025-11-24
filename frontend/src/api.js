@@ -143,9 +143,29 @@ export const api = {
    */
   async getJobStatus(jobId) {
     const response = await fetch(`${API_BASE}/api/jobs/${jobId}`);
-    if (!response.ok) {
-      throw new Error('Failed to get job status');
-    }
+    if (!response.ok) throw new Error('Failed to get job status');
+    return response.json();
+  },
+
+  async getConfig() {
+    const response = await fetch(`${API_BASE}/api/config`);
+    if (!response.ok) throw new Error('Failed to get config');
+    return response.json();
+  },
+
+  async updateConfig(config) {
+    const response = await fetch(`${API_BASE}/api/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    if (!response.ok) throw new Error('Failed to update config');
+    return response.json();
+  },
+
+  async listModels(provider) {
+    const response = await fetch(`${API_BASE}/api/models/${provider}`);
+    if (!response.ok) throw new Error('Failed to list models');
     return response.json();
   },
 

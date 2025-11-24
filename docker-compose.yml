@@ -11,6 +11,8 @@ services:
     environment:
       # OpenRouter API key - required for LLM queries
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      # For local Ollama, use http://host.docker.internal:11434 as base URL in settings
+      # Linux users may need to add --add-host=host.docker.internal:host-gateway to run command
     volumes:
       # Persist conversation data
       - ./data:/app/data

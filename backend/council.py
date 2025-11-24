@@ -1,32 +1,45 @@
 """3-stage LLM Council orchestration."""
 
-from typing import List, Dict, Any, Tuple
-from .openrouter import query_models_parallel, query_model
-from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
+from typing import List, Dict, Any, Tuple, Optional
+import asyncio
+from .config import config_manager
+from .providers import ProviderFactory, ModelProvider
 
+async def query_models_parallel(
+    provider: ModelProvider,
+    models: List[str],
+    messages: List[Dict[str, str]]
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """
+    Query multiple models in parallel using the given provider.
+    """
+    async def query_safe(model):
+        return await provider.query(model, messages)
 
-async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
+    tasks = [query_safe(model) for model in models]
+    responses = await asyncio.gather(*tasks)
+    return {model: response for model, response in zip(models, responses)}
+
+async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]], float, Dict[str, str]]:
     """
     Stage 1: Collect individual responses from all council models.
-
-    Args:
-        user_query: The user's question
-
-    Returns:
-        List of dicts with 'model' and 'response' keys
     """
+    config = config_manager.get_config()
+    provider = ProviderFactory.get_provider(config)
+    council_models = config.get("council_models", [])
+
     messages = [{"role": "user", "content": user_query}]
 
     # Query all models in parallel
-    responses = await query_models_parallel(COUNCIL_MODELS, messages)
+    responses = await query_models_parallel(provider, council_models, messages)
 
     # Format results and collect costs + generation IDs
     stage1_results = []
     total_cost = 0.0
-    generation_ids = {}  # Track generation IDs for cost polling
+    generation_ids = {}
     
     for model, response in responses.items():
-        if response is not None:  # Only include successful responses
+        if response is not None:
             # Extract cost and generation ID
             model_cost = 0.0
             cost_status = 'estimated'
@@ -39,7 +52,6 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
                 gen_id = usage.get('generation_id')
                 total_cost += model_cost
                 
-                # Store generation ID for later polling
                 if gen_id:
                     generation_ids[f"stage1_{model}"] = gen_id
             
@@ -56,17 +68,14 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
 async def stage2_collect_rankings(
     user_query: str,
     stage1_results: List[Dict[str, Any]]
-) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, str], float, Dict[str, str]]:
     """
     Stage 2: Each model ranks the anonymized responses.
-
-    Args:
-        user_query: The original user query
-        stage1_results: Results from Stage 1
-
-    Returns:
-        Tuple of (rankings list, label_to_model mapping)
     """
+    config = config_manager.get_config()
+    provider = ProviderFactory.get_provider(config)
+    council_models = config.get("council_models", [])
+
     # Create anonymized labels for responses (Response A, Response B, etc.)
     labels = [chr(65 + i) for i in range(len(stage1_results))]  # A, B, C, ...
 
@@ -116,7 +125,7 @@ Now provide your evaluation and ranking:"""
     messages = [{"role": "user", "content": ranking_prompt}]
 
     # Get rankings from all council models in parallel
-    responses = await query_models_parallel(COUNCIL_MODELS, messages)
+    responses = await query_models_parallel(provider, council_models, messages)
 
     # Format results and collect costs + generation IDs
     stage2_results = []
@@ -158,18 +167,14 @@ async def stage3_synthesize_final(
     user_query: str,
     stage1_results: List[Dict[str, Any]],
     stage2_results: List[Dict[str, Any]]
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], float, Dict[str, str]]:
     """
     Stage 3: Chairman synthesizes final response.
-
-    Args:
-        user_query: The original user query
-        stage1_results: Individual model responses from Stage 1
-        stage2_results: Rankings from Stage 2
-
-    Returns:
-        Dict with 'model' and 'response' keys
     """
+    config = config_manager.get_config()
+    provider = ProviderFactory.get_provider(config)
+    chairman_model = config.get("chairman_model")
+
     # Build comprehensive context for chairman
     stage1_text = "\n\n".join([
         f"Model: {result['model']}\nResponse: {result['response']}"
@@ -201,14 +206,14 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     messages = [{"role": "user", "content": chairman_prompt}]
 
     # Query the chairman model
-    response = await query_model(CHAIRMAN_MODEL, messages)
+    response = await provider.query(chairman_model, messages)
 
     if response is None:
         # Fallback if chairman fails
         return {
-            "model": CHAIRMAN_MODEL,
+            "model": chairman_model,
             "response": "Error: Unable to generate final synthesis."
-        }, 0.0
+        }, 0.0, {}
 
     # Extract cost and generation ID
     cost = 0.0
@@ -223,10 +228,10 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     
     generation_ids = {}
     if gen_id:
-        generation_ids[f"stage3_{CHAIRMAN_MODEL}"] = gen_id
+        generation_ids[f"stage3_{chairman_model}"] = gen_id
 
     return {
-        "model": CHAIRMAN_MODEL,
+        "model": chairman_model,
         "response": response.get('content', ''),
         "cost": cost,
         "cost_status": cost_status
@@ -236,12 +241,6 @@ Provide a clear, well-reasoned final answer that represents the council's collec
 def parse_ranking_from_text(ranking_text: str) -> List[str]:
     """
     Parse the FINAL RANKING section from the model's response.
-
-    Args:
-        ranking_text: The full text response from the model
-
-    Returns:
-        List of response labels in ranked order
     """
     import re
 
@@ -252,7 +251,6 @@ def parse_ranking_from_text(ranking_text: str) -> List[str]:
         if len(parts) >= 2:
             ranking_section = parts[1]
             # Try to extract numbered list format (e.g., "1. Response A")
-            # This pattern looks for: number, period, optional space, "Response X"
             numbered_matches = re.findall(r'\d+\.\s*Response [A-Z]', ranking_section)
             if numbered_matches:
                 # Extract just the "Response X" part
@@ -273,13 +271,6 @@ def calculate_aggregate_rankings(
 ) -> List[Dict[str, Any]]:
     """
     Calculate aggregate rankings across all models.
-
-    Args:
-        stage2_results: Rankings from each model
-        label_to_model: Mapping from anonymous labels to model names
-
-    Returns:
-        List of dicts with model name and average rank, sorted best to worst
     """
     from collections import defaultdict
 
@@ -317,13 +308,23 @@ def calculate_aggregate_rankings(
 async def generate_conversation_title(user_query: str) -> str:
     """
     Generate a short title for a conversation based on the first user message.
-
-    Args:
-        user_query: The first user message
-
-    Returns:
-        A short title (3-5 words)
     """
+    config = config_manager.get_config()
+    provider = ProviderFactory.get_provider(config)
+    
+    # Use a cheap model for title generation
+    # For OpenRouter, we use gemini-2.5-flash
+    # For Ollama, we use the chairman model (or first available)
+    # For OpenAI, we use gpt-3.5-turbo or similar if available, or just the chairman
+    
+    title_model = "google/gemini-2.5-flash" # Default for OpenRouter
+    
+    if config.get("provider") == "ollama":
+        # Use chairman or first council model
+        title_model = config.get("chairman_model") or (config.get("council_models") or ["llama2"])[0]
+    elif config.get("provider") == "openai":
+        title_model = "gpt-3.5-turbo" # Assumption
+        
     title_prompt = f"""Generate a very short title (3-5 words maximum) that summarizes the following question.
 The title should be concise and descriptive. Do not use quotes or punctuation in the title.
 
@@ -333,13 +334,9 @@ Title:"""
 
     messages = [{"role": "user", "content": title_prompt}]
 
-    # Use gemini-2.5-flash for title generation (fast and cheap)
-    # Note: Title generation cost is NOT included in conversation total cost
-    # Cost is negligible (~$0.0001 per title) so we don't track it
-    response = await query_model("google/gemini-2.5-flash", messages, timeout=30.0)
+    response = await provider.query(title_model, messages, timeout=30.0)
 
     if response is None:
-        # Fallback to a generic title
         return "New Conversation"
 
     title = response.get('content', 'New Conversation').strip()
@@ -357,12 +354,6 @@ Title:"""
 async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict, float]:
     """
     Run the complete 3-stage council process.
-
-    Args:
-        user_query: The user's question
-
-    Returns:
-        Tuple of (stage1_results, stage2_results, stage3_result, metadata, total_cost)
     """
     total_cost = 0.0
     

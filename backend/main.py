@@ -288,6 +288,43 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
     )
 
 
+@app.get("/api/config")
+async def get_config():
+    """Get current configuration."""
+    from .config import config_manager
+    return config_manager.get_config()
+
+
+@app.post("/api/config")
+async def update_config(config: Dict[str, Any]):
+    """Update configuration."""
+    from .config import config_manager
+    return config_manager.update_config(config)
+
+
+@app.get("/api/models/{provider}")
+async def list_models(provider: str):
+    """List available models for a provider."""
+    from .config import config_manager
+    from .providers import ProviderFactory
+    
+    # Create a temporary config to get the provider instance
+    # We use the current config but override the provider type
+    # This allows listing models for a provider before switching to it
+    current_config = config_manager.get_config().copy()
+    current_config["provider"] = provider
+    
+    # For OpenAI/OpenRouter, we might need keys from the request if they aren't saved yet
+    # But for now, let's assume we use what's in the config or defaults
+    
+    try:
+        provider_instance = ProviderFactory.get_provider(current_config)
+        models = await provider_instance.list_models()
+        return {"models": models}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8002)

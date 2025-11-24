@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useParams, Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatInterface from './components/ChatInterface';
+import SettingsModal from './components/SettingsModal';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { api } from './api';
 import './App.css';
@@ -69,13 +70,13 @@ function ConversationView() {
     if (!confirm('Are you sure you want to delete this conversation?')) {
       return;
     }
-    
+
     try {
       await api.deleteConversation(convId);
-      
+
       // Remove from conversations list
       setConversations(conversations.filter(c => c.id !== convId));
-      
+
       // If current conversation was deleted, navigate to home
       if (conversationId === convId) {
         navigate('/');
@@ -89,14 +90,14 @@ function ConversationView() {
   // Check for pending jobs on mount and resume polling
   useEffect(() => {
     if (!conversationId) return;
-    
+
     const pendingJobs = JSON.parse(localStorage.getItem('pendingJobs') || '{}');
     const jobsForConv = Object.entries(pendingJobs).filter(([_, convId]) => convId === conversationId);
-    
+
     if (jobsForConv.length > 0) {
       // Set loading state for this conversation
       setIsLoading(true);
-      
+
       jobsForConv.forEach(([jobId, convId]) => {
         pollJobStatus(jobId, convId);
       });
@@ -107,14 +108,14 @@ function ConversationView() {
     const pollInterval = setInterval(async () => {
       try {
         const job = await api.getJobStatus(jobId);
-        
+
         if (job.status === 'completed') {
           clearInterval(pollInterval);
           // Remove from pending jobs
           const pendingJobs = JSON.parse(localStorage.getItem('pendingJobs') || '{}');
           delete pendingJobs[jobId];
           localStorage.setItem('pendingJobs', JSON.stringify(pendingJobs));
-          
+
           // Reload conversation to show result
           if (conversationId) {
             await loadConversation(conversationId);
@@ -127,17 +128,17 @@ function ConversationView() {
           const pendingJobs = JSON.parse(localStorage.getItem('pendingJobs') || '{}');
           delete pendingJobs[jobId];
           localStorage.setItem('pendingJobs', JSON.stringify(pendingJobs));
-          
+
           // Only show error if not cancelled by user
           if (job.error !== 'Cancelled by user') {
             console.error('Job failed:', job.error);
           }
-          
+
           // Reload conversation to update UI
           if (conversationId) {
             await loadConversation(conversationId);
           }
-          
+
           setIsLoading(false);
         } else {
           // Still processing - update UI
@@ -188,7 +189,7 @@ function ConversationView() {
 
       // Send message for async processing first
       const { job_id } = await api.sendMessageAsync(conversationId, content);
-      
+
       // Create a partial assistant message showing it's processing
       const assistantMessage = {
         role: 'assistant',
@@ -205,12 +206,12 @@ function ConversationView() {
         ...prev,
         messages: [...prev.messages, assistantMessage],
       }));
-      
+
       // Store job_id in localStorage for recovery after browser close
       const pendingJobs = JSON.parse(localStorage.getItem('pendingJobs') || '{}');
       pendingJobs[job_id] = conversationId;
       localStorage.setItem('pendingJobs', JSON.stringify(pendingJobs));
-      
+
       // Start polling for job status
       pollJobStatus(job_id, conversationId);
 
@@ -349,11 +350,13 @@ function ConversationView() {
     }
   };
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   return (
     <ThemeProvider>
       <div className="app">
         {/* Hamburger menu button - mobile only */}
-        <button 
+        <button
           className={`hamburger-menu ${sidebarOpen ? 'open' : ''}`}
           onClick={() => setSidebarOpen(!sidebarOpen)}
           aria-label="Toggle menu"
@@ -371,11 +374,16 @@ function ConversationView() {
           onDeleteConversation={handleDeleteConversation}
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
         <ChatInterface
           conversation={currentConversation}
           onSendMessage={handleSendMessage}
           isLoading={isLoading}
+        />
+        <SettingsModal
+          isOpen={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
         />
       </div>
     </ThemeProvider>
