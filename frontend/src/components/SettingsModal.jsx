@@ -46,6 +46,15 @@ function SettingsModal({ isOpen, onClose }) {
         try {
             setLoading(true);
             const data = await api.getConfig();
+
+            // Ensure openai is an array (handle legacy/migration edge cases in frontend state)
+            if (data.providers.openai && !Array.isArray(data.providers.openai)) {
+                data.providers.openai = [data.providers.openai];
+            }
+            if (!data.providers.openai) {
+                data.providers.openai = [];
+            }
+
             setConfig(data);
             loadAllModels();
         } catch (error) {
@@ -55,7 +64,7 @@ function SettingsModal({ isOpen, onClose }) {
                 providers: {
                     ollama: { base_url: 'http://localhost:11434' },
                     openrouter: { api_key: '' },
-                    openai: { base_url: 'https://api.openai.com/v1', api_key: '' }
+                    openai: [{ name: 'Default', base_url: 'https://api.openai.com/v1', api_key: '' }]
                 },
                 council_models: [],
                 chairman_model: { name: '', provider: 'ollama' }
@@ -90,36 +99,74 @@ function SettingsModal({ isOpen, onClose }) {
 
         // Check if required provider credentials are present for selected models
         const usedProviders = new Set();
+        const usedOpenAIConfigs = new Set();
 
         // Collect providers from council models
         config.council_models.forEach(model => {
             if (model.provider) usedProviders.add(model.provider);
+            if (model.provider === 'openai' && model.openai_config_name) {
+                usedOpenAIConfigs.add(model.openai_config_name);
+            }
         });
 
         // Add chairman model provider
         if (config.chairman_model && config.chairman_model.provider) {
             usedProviders.add(config.chairman_model.provider);
+            if (config.chairman_model.provider === 'openai' && config.chairman_model.openai_config_name) {
+                usedOpenAIConfigs.add(config.chairman_model.openai_config_name);
+            }
         }
 
         // Validate each used provider has required credentials
-        for (const provider of usedProviders) {
-            if (provider === 'openrouter' && !config.providers.openrouter?.api_key) {
-                setStatus({ type: 'error', message: 'OpenRouter API Key is required for selected models.' });
+        if (usedProviders.has('openrouter') && !config.providers.openrouter?.api_key) {
+            setStatus({ type: 'error', message: 'OpenRouter API Key is required for selected models.' });
+            return false;
+        }
+        if (usedProviders.has('ollama') && !config.providers.ollama?.base_url) {
+            setStatus({ type: 'error', message: 'Ollama Base URL is required for selected models.' });
+            return false;
+        }
+
+        if (usedProviders.has('openai')) {
+            const openaiConfigs = config.providers.openai || [];
+            if (openaiConfigs.length === 0) {
+                setStatus({ type: 'error', message: 'At least one OpenAI configuration is required.' });
                 return false;
             }
-            if (provider === 'ollama' && !config.providers.ollama?.base_url) {
-                setStatus({ type: 'error', message: 'Ollama Base URL is required for selected models.' });
-                return false;
+
+            // Names must be unique so configs can be targeted reliably
+            const openaiNameSet = new Set();
+
+            // Check if used configs exist and are valid
+            for (const configName of usedOpenAIConfigs) {
+                const conf = openaiConfigs.find(c => c.name === configName);
+                if (!conf) {
+                    setStatus({ type: 'error', message: `OpenAI config "${configName}" is used but not defined.` });
+                    return false;
+                }
+                if (!conf.base_url) {
+                    setStatus({ type: 'error', message: `Base URL is required for OpenAI config "${configName}".` });
+                    return false;
+                }
+                if (!conf.api_key) {
+                    setStatus({ type: 'error', message: `API Key is required for OpenAI config "${configName}".` });
+                    return false;
+                }
             }
-            if (provider === 'openai') {
-                if (!config.providers.openai?.base_url) {
-                    setStatus({ type: 'error', message: 'OpenAI Base URL is required for selected models.' });
+
+            // If no specific config is used but 'openai' provider is selected (e.g. default), check the first one or all?
+            // Let's just check that all defined configs have at least a name and base_url
+            for (const conf of openaiConfigs) {
+                if (!conf.name) {
+                    setStatus({ type: 'error', message: 'All OpenAI configurations must have a name.' });
                     return false;
                 }
-                if (!config.providers.openai?.api_key) {
-                    setStatus({ type: 'error', message: 'OpenAI API Key is required for selected models.' });
+                const normalizedName = conf.name.trim().toLowerCase();
+                if (openaiNameSet.has(normalizedName)) {
+                    setStatus({ type: 'error', message: 'OpenAI configuration names must be unique.' });
                     return false;
                 }
+                openaiNameSet.add(normalizedName);
             }
         }
 
@@ -162,6 +209,14 @@ function SettingsModal({ isOpen, onClose }) {
     const handleCouncilModelChange = (index, field, value) => {
         const newModels = [...config.council_models];
         newModels[index] = { ...newModels[index], [field]: value };
+
+        // If provider changed to openai, set default config name if not present
+        if (field === 'provider' && value === 'openai' && !newModels[index].openai_config_name) {
+            if (config.providers.openai && config.providers.openai.length > 0) {
+                newModels[index].openai_config_name = config.providers.openai[0].name;
+            }
+        }
+
         setConfig({ ...config, council_models: newModels });
     };
 
@@ -186,6 +241,46 @@ function SettingsModal({ isOpen, onClose }) {
                     ...config.providers[provider],
                     [field]: value
                 }
+            }
+        });
+    };
+
+    // OpenAI specific management
+    const addOpenAIConfig = () => {
+        const newConfig = {
+            name: `Config ${config.providers.openai.length + 1}`,
+            base_url: 'https://api.openai.com/v1',
+            api_key: ''
+        };
+        setConfig({
+            ...config,
+            providers: {
+                ...config.providers,
+                openai: [...(config.providers.openai || []), newConfig]
+            }
+        });
+    };
+
+    const removeOpenAIConfig = (index) => {
+        const newConfigs = [...config.providers.openai];
+        newConfigs.splice(index, 1);
+        setConfig({
+            ...config,
+            providers: {
+                ...config.providers,
+                openai: newConfigs
+            }
+        });
+    };
+
+    const updateOpenAIConfig = (index, field, value) => {
+        const newConfigs = [...config.providers.openai];
+        newConfigs[index] = { ...newConfigs[index], [field]: value };
+        setConfig({
+            ...config,
+            providers: {
+                ...config.providers,
+                openai: newConfigs
             }
         });
     };
@@ -322,23 +417,48 @@ function SettingsModal({ isOpen, onClose }) {
                                 </div>
                                 {expandedProviders.openai && (
                                     <div className="provider-content">
-                                        <div className="form-group">
-                                            <label>Base URL</label>
-                                            <input
-                                                type="text"
-                                                value={config.providers.openai?.base_url || ''}
-                                                onChange={(e) => updateProviderConfig('openai', 'base_url', e.target.value)}
-                                                placeholder="https://api.openai.com/v1"
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label>API Key</label>
-                                            <input
-                                                type="password"
-                                                value={config.providers.openai?.api_key || ''}
-                                                onChange={(e) => updateProviderConfig('openai', 'api_key', e.target.value)}
-                                                placeholder="sk-..."
-                                            />
+                                        <div className="openai-configs-list">
+                                            {(config.providers.openai || []).map((conf, index) => (
+                                                <div key={index} className="openai-config-item">
+                                                    <div className="openai-config-header">
+                                                        <input
+                                                            type="text"
+                                                            className="config-name-input"
+                                                            value={conf.name}
+                                                            onChange={(e) => updateOpenAIConfig(index, 'name', e.target.value)}
+                                                            placeholder="Provider Name (e.g. OpenAI, LocalAI)"
+                                                        />
+                                                        <button
+                                                            className="remove-config-button"
+                                                            onClick={() => removeOpenAIConfig(index)}
+                                                            title="Remove this configuration"
+                                                        >
+                                                            &times;
+                                                        </button>
+                                                    </div>
+                                                    <div className="form-group">
+                                                        <label>Base URL</label>
+                                                        <input
+                                                            type="text"
+                                                            value={conf.base_url || ''}
+                                                            onChange={(e) => updateOpenAIConfig(index, 'base_url', e.target.value)}
+                                                            placeholder="https://api.openai.com/v1"
+                                                        />
+                                                    </div>
+                                                    <div className="form-group">
+                                                        <label>API Key</label>
+                                                        <input
+                                                            type="password"
+                                                            value={conf.api_key || ''}
+                                                            onChange={(e) => updateOpenAIConfig(index, 'api_key', e.target.value)}
+                                                            placeholder="sk-..."
+                                                        />
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            <button className="add-config-button" onClick={addOpenAIConfig}>
+                                                + Add OpenAI Configuration
+                                            </button>
                                         </div>
                                     </div>
                                 )}
@@ -364,6 +484,19 @@ function SettingsModal({ isOpen, onClose }) {
                                                     <option key={p.id} value={p.id}>{p.name}</option>
                                                 ))}
                                             </select>
+
+                                            {model.provider === 'openai' && (
+                                                <select
+                                                    value={model.openai_config_name || (config.providers.openai?.[0]?.name) || ''}
+                                                    onChange={(e) => handleCouncilModelChange(index, 'openai_config_name', e.target.value)}
+                                                    className="openai-config-select"
+                                                >
+                                                    {(config.providers.openai || []).map(conf => (
+                                                        <option key={conf.name} value={conf.name}>{conf.name}</option>
+                                                    ))}
+                                                </select>
+                                            )}
+
                                             <input
                                                 type="text"
                                                 value={model.name || ''}
@@ -375,7 +508,11 @@ function SettingsModal({ isOpen, onClose }) {
                                                             ? 'e.g., deepseek-r1:1.5b'
                                                             : 'Model name'
                                                 }
-                                                list={`available-models-${model.provider || 'ollama'}`}
+                                                list={
+                                                    model.provider === 'openai'
+                                                        ? `available-models-openai:${model.openai_config_name || (config.providers.openai?.[0]?.name) || ''}`
+                                                        : `available-models-${model.provider || 'ollama'}`
+                                                }
                                             />
                                             <button className="remove-button" onClick={() => removeCouncilModel(index)}>&times;</button>
                                         </div>
@@ -402,19 +539,47 @@ function SettingsModal({ isOpen, onClose }) {
                             <div className="model-row">
                                 <select
                                     value={config.chairman_model?.provider || 'ollama'}
-                                    onChange={(e) => setConfig({
-                                        ...config,
-                                        chairman_model: {
-                                            ...config.chairman_model,
-                                            provider: e.target.value
+                                    onChange={(e) => {
+                                        const newProvider = e.target.value;
+                                        const updates = { provider: newProvider };
+                                        if (newProvider === 'openai' && !config.chairman_model.openai_config_name) {
+                                            if (config.providers.openai && config.providers.openai.length > 0) {
+                                                updates.openai_config_name = config.providers.openai[0].name;
+                                            }
                                         }
-                                    })}
+                                        setConfig({
+                                            ...config,
+                                            chairman_model: {
+                                                ...config.chairman_model,
+                                                ...updates
+                                            }
+                                        });
+                                    }}
                                     className="provider-select"
                                 >
                                     {PROVIDERS.map(p => (
                                         <option key={p.id} value={p.id}>{p.name}</option>
                                     ))}
                                 </select>
+
+                                {config.chairman_model?.provider === 'openai' && (
+                                    <select
+                                        value={config.chairman_model.openai_config_name || (config.providers.openai?.[0]?.name) || ''}
+                                        onChange={(e) => setConfig({
+                                            ...config,
+                                            chairman_model: {
+                                                ...config.chairman_model,
+                                                openai_config_name: e.target.value
+                                            }
+                                        })}
+                                        className="openai-config-select"
+                                    >
+                                        {(config.providers.openai || []).map(conf => (
+                                            <option key={conf.name} value={conf.name}>{conf.name}</option>
+                                        ))}
+                                    </select>
+                                )}
+
                                 <input
                                     type="text"
                                     value={config.chairman_model?.name || ''}

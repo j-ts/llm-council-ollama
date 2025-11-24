@@ -6,9 +6,19 @@ function deAnonymizeText(text, labelToModel) {
   if (!labelToModel) return text;
 
   let result = text;
+
+  const getLabelName = (label) => {
+    const entry = labelToModel[label];
+    if (!entry) return label;
+    if (typeof entry === 'string') {
+      return entry.split('/')[1] || entry;
+    }
+    return entry.model_display || entry.model || entry.id || label;
+  };
+
   // Replace each "Response X" with the actual model name
   Object.entries(labelToModel).forEach(([label, model]) => {
-    const modelShortName = model.split('/')[1] || model;
+    const modelShortName = getLabelName(label);
     result = result.replace(new RegExp(label, 'g'), `**${modelShortName}**`);
   });
   return result;
@@ -23,6 +33,8 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, stag
 
   // Calculate total stage cost
   const totalCost = stageCost || rankings.reduce((sum, r) => sum + (r.cost || 0), 0);
+
+  const getModelName = (entry) => entry.model_display || entry.model || entry.model_id || 'Model';
 
   return (
     <div className="stage stage2">
@@ -40,11 +52,11 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, stag
       <div className="tabs">
         {rankings.map((rank, index) => (
           <button
-            key={index}
+            key={rank.model_id || rank.model || index}
             className={`tab ${activeTab === index ? 'active' : ''}`}
             onClick={() => setActiveTab(index)}
           >
-            <span className="tab-model">{rank.model.split('/')[1] || rank.model}</span>
+            <span className="tab-model">{getModelName(rank)}</span>
             {rank.cost > 0 && <span className="tab-cost">${rank.cost.toFixed(4)}</span>}
           </button>
         ))}
@@ -52,7 +64,7 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, stag
 
       <div className="tab-content">
         <div className="ranking-model">
-          {rankings[activeTab].model}
+          {getModelName(rankings[activeTab])}
         </div>
         <div className="ranking-content markdown-content">
           <ReactMarkdown>
@@ -67,9 +79,14 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, stag
             <ol>
               {rankings[activeTab].parsed_ranking.map((label, i) => (
                 <li key={i}>
-                  {labelToModel && labelToModel[label]
-                    ? labelToModel[label].split('/')[1] || labelToModel[label]
-                    : label}
+                  {(() => {
+                    const entry = labelToModel && labelToModel[label];
+                    if (!entry) return label;
+                    if (typeof entry === 'string') {
+                      return entry.split('/')[1] || entry;
+                    }
+                    return entry.model_display || entry.model || entry.id || label;
+                  })()}
                 </li>
               ))}
             </ol>
@@ -85,10 +102,10 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, stag
           </p>
           <div className="aggregate-list">
             {aggregateRankings.map((agg, index) => (
-              <div key={index} className="aggregate-item">
+              <div key={agg.model_id || agg.model || index} className="aggregate-item">
                 <span className="rank-position">#{index + 1}</span>
                 <span className="rank-model">
-                  {agg.model.split('/')[1] || agg.model}
+                  {agg.model_display || agg.model}
                 </span>
                 <span className="rank-score">
                   Avg: {agg.average_rank.toFixed(2)}

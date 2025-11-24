@@ -299,7 +299,12 @@ async def get_config():
 async def update_config(config: Dict[str, Any]):
     """Update configuration."""
     from .config import config_manager
-    return config_manager.update_config(config)
+    from .providers import ProviderFactory
+
+    updated = config_manager.update_config(config)
+    # Reset cached providers so credential changes take effect immediately
+    ProviderFactory.clear_cache()
+    return updated
 
 
 @app.get("/api/models/all")
@@ -355,4 +360,3 @@ async def list_models(provider: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
-

@@ -7,6 +7,7 @@ export default function Stage3({ finalResponse }) {
   }
 
   const cost = finalResponse.cost || 0;
+  const displayName = finalResponse.model_display || finalResponse.model || 'Chairman';
 
   return (
     <div className="stage stage3">
@@ -16,7 +17,7 @@ export default function Stage3({ finalResponse }) {
       </h3>
       <div className="final-response">
         <div className="chairman-label">
-          Chairman: {finalResponse.model.split('/')[1] || finalResponse.model}
+          Chairman: {displayName}
         </div>
         <div className="final-text markdown-content">
           <ReactMarkdown>{finalResponse.response}</ReactMarkdown>

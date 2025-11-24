@@ -3,13 +3,47 @@
 from typing import List, Dict, Any, Tuple, Optional
 import asyncio
 from .config import config_manager
-from .providers import ProviderFactory, ModelProvider
+from .providers import ProviderFactory
+
+
+def build_model_key(model_config: Dict[str, Any]) -> str:
+    """
+    Build a stable identifier for a model configuration.
+    Includes provider and OpenAI config name (when present) to avoid collisions.
+    """
+    provider = model_config.get("provider", "openrouter")
+    model_name = model_config.get("name", "")
+    parts = [provider]
+
+    if provider == "openai":
+        parts.append(model_config.get("openai_config_name", "default"))
+
+    parts.append(model_name)
+    return "::".join(parts)
+
+
+def build_model_display_name(model_config: Dict[str, Any]) -> str:
+    """
+    Human-friendly label that includes the provider/config when useful.
+    """
+    model_name = model_config.get("name", "")
+    provider = model_config.get("provider", "openrouter")
+
+    if provider == "openai":
+        config_name = model_config.get("openai_config_name") or "OpenAI"
+        return f"{model_name} ({config_name})"
+    if provider == "openrouter":
+        return f"{model_name} (OpenRouter)"
+    if provider == "ollama":
+        return f"{model_name} (Ollama)"
+    return f"{model_name} ({provider})"
+
 
 async def query_models_parallel(
     model_configs: List[Dict[str, Any]],
     providers_config: Dict[str, Any],
     messages: List[Dict[str, str]]
-) -> Dict[str, Optional[Dict[str, Any]]]:
+) -> Dict[str, Dict[str, Any]]:
     """
     Query multiple models in parallel, each with their own provider.
     """
@@ -24,14 +58,15 @@ async def query_models_parallel(
     tasks = [query_safe(model_config) for model_config in model_configs]
     responses = await asyncio.gather(*tasks, return_exceptions=True)
     
-    # Map responses by model name
+    # Map responses by stable model key to avoid collisions across providers/configs
     result = {}
     for model_config, response in zip(model_configs, responses):
+        key = build_model_key(model_config)
         if isinstance(response, Exception):
             print(f"Exception for model {model_config.get('name')}: {response}")
-            result[model_config["name"]] = None
+            result[key] = {"response": None, "model_config": model_config}
         else:
-            result[model_config["name"]] = response
+            result[key] = {"response": response, "model_config": model_config}
     
     return result
 
@@ -53,7 +88,10 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
     total_cost = 0.0
     generation_ids = {}
     
-    for model_name, response in responses.items():
+    for model_key, data in responses.items():
+        response = data.get("response")
+        model_config = data.get("model_config", {})
+
         if response is not None:
             # Extract cost and generation ID
             model_cost = 0.0
@@ -68,10 +106,14 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
                 total_cost += model_cost
                 
                 if gen_id:
-                    generation_ids[f"stage1_{model_name}"] = gen_id
+                    generation_ids[f"stage1_{model_key}"] = gen_id
             
             stage1_results.append({
-                "model": model_name,
+                "model_id": model_key,
+                "model": model_config.get("name", model_key),
+                "model_display": build_model_display_name(model_config),
+                "provider": model_config.get("provider"),
+                "openai_config_name": model_config.get("openai_config_name"),
                 "response": response.get('content', ''),
                 "cost": model_cost,
                 "cost_status": cost_status
@@ -83,7 +125,7 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
 async def stage2_collect_rankings(
     user_query: str,
     stage1_results: List[Dict[str, Any]]
-) -> Tuple[List[Dict[str, Any]], Dict[str, str], float, Dict[str, str]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], float, Dict[str, str]]:
     """
     Stage 2: Each model ranks the anonymized responses.
     """
@@ -96,7 +138,13 @@ async def stage2_collect_rankings(
 
     # Create mapping from label to model name
     label_to_model = {
-        f"Response {label}": result['model']
+        f"Response {label}": {
+            "id": result.get("model_id", result.get("model")),
+            "model": result.get("model"),
+            "model_display": result.get("model_display") or result.get("model"),
+            "provider": result.get("provider"),
+            "openai_config_name": result.get("openai_config_name"),
+        }
         for label, result in zip(labels, stage1_results)
     }
 
@@ -147,7 +195,10 @@ Now provide your evaluation and ranking:"""
     total_cost = 0.0
     generation_ids = {}
     
-    for model, response in responses.items():
+    for model_key, data in responses.items():
+        response = data.get("response")
+        model_config = data.get("model_config", {})
+
         if response is not None:
             full_text = response.get('content', '')
             parsed = parse_ranking_from_text(full_text)
@@ -165,10 +216,14 @@ Now provide your evaluation and ranking:"""
                 total_cost += model_cost
                 
                 if gen_id:
-                    generation_ids[f"stage2_{model}"] = gen_id
+                    generation_ids[f"stage2_{model_key}"] = gen_id
             
             stage2_results.append({
-                "model": model,
+                "model_id": model_key,
+                "model": model_config.get("name", model_key),
+                "model_display": build_model_display_name(model_config),
+                "provider": model_config.get("provider"),
+                "openai_config_name": model_config.get("openai_config_name"),
                 "ranking": full_text,
                 "parsed_ranking": parsed,
                 "cost": model_cost,
@@ -190,15 +245,17 @@ async def stage3_synthesize_final(
     providers_config = config.get("providers", {})
     chairman_model_config = config.get("chairman_model", {})
     chairman_model_name = chairman_model_config.get("name") if isinstance(chairman_model_config, dict) else chairman_model_config
+    chairman_model_id = build_model_key(chairman_model_config) if isinstance(chairman_model_config, dict) else chairman_model_name
+    chairman_model_display = build_model_display_name(chairman_model_config if isinstance(chairman_model_config, dict) else {"name": chairman_model_name})
 
     # Build comprehensive context for chairman
     stage1_text = "\n\n".join([
-        f"Model: {result['model']}\nResponse: {result['response']}"
+        f"Model: {result.get('model_display', result.get('model'))}\nResponse: {result['response']}"
         for result in stage1_results
     ])
 
     stage2_text = "\n\n".join([
-        f"Model: {result['model']}\nRanking: {result['ranking']}"
+        f"Model: {result.get('model_display', result.get('model'))}\nRanking: {result['ranking']}"
         for result in stage2_results
     ])
 
@@ -232,7 +289,9 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     if response is None:
         # Fallback if chairman fails
         return {
+            "model_id": chairman_model_id,
             "model": chairman_model_name,
+            "model_display": chairman_model_display,
             "response": "Error: Unable to generate final synthesis."
         }, 0.0, {}
 
@@ -249,10 +308,12 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     
     generation_ids = {}
     if gen_id:
-        generation_ids[f"stage3_{chairman_model_name}"] = gen_id
+        generation_ids[f"stage3_{chairman_model_id}"] = gen_id
 
     return {
+        "model_id": chairman_model_id,
         "model": chairman_model_name,
+        "model_display": chairman_model_display,
         "response": response.get('content', ''),
         "cost": cost,
         "cost_status": cost_status
@@ -288,15 +349,25 @@ def parse_ranking_from_text(ranking_text: str) -> List[str]:
 
 def calculate_aggregate_rankings(
     stage2_results: List[Dict[str, Any]],
-    label_to_model: Dict[str, str]
+    label_to_model: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
     """
     Calculate aggregate rankings across all models.
     """
     from collections import defaultdict
 
-    # Track positions for each model
+    def _normalize_label(entry: Any) -> Tuple[str, str, str]:
+        """Return (id, base_model, display_name) for a label entry."""
+        if isinstance(entry, dict):
+            model_id = entry.get("id") or entry.get("model_id") or entry.get("model")
+            base_model = entry.get("model") or model_id
+            display = entry.get("model_display") or base_model or model_id
+            return model_id or display, base_model or display, display or base_model
+        return entry, entry, entry
+
+    # Track positions for each model (by id) and store display names
     model_positions = defaultdict(list)
+    model_display_lookup: Dict[str, Tuple[str, str]] = {}
 
     for ranking in stage2_results:
         ranking_text = ranking['ranking']
@@ -306,16 +377,21 @@ def calculate_aggregate_rankings(
 
         for position, label in enumerate(parsed_ranking, start=1):
             if label in label_to_model:
-                model_name = label_to_model[label]
-                model_positions[model_name].append(position)
+                model_id, base_model, display = _normalize_label(label_to_model[label])
+                model_positions[model_id].append(position)
+                model_display_lookup[model_id] = (base_model, display)
 
     # Calculate average position for each model
     aggregate = []
-    for model, positions in model_positions.items():
+    for model_id, positions in model_positions.items():
         if positions:
             avg_rank = sum(positions) / len(positions)
+            base_model, display_name = model_display_lookup.get(model_id, (model_id, model_id))
             aggregate.append({
-                "model": model,
+                "model_id": model_id,
+                "model": display_name,
+                "model_display": display_name,
+                "base_model": base_model,
                 "average_rank": round(avg_rank, 2),
                 "rankings_count": len(positions)
             })
@@ -394,6 +470,7 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict, flo
     if not stage1_results:
         return [], [], {
             "model": "error",
+            "model_display": "error",
             "response": "All models failed to respond. Please try again."
         }, {}, 0.0
 

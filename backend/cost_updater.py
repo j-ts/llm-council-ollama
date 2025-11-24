@@ -49,7 +49,7 @@ async def update_conversation_costs(conversation_id: str, generation_ids: Dict[s
     # Update stage1 costs
     if 'stage1' in assistant_msg:
         for i, resp in enumerate(assistant_msg['stage1']):
-            key = f"stage1_{resp['model']}"
+            key = f"stage1_{resp.get('model_id', resp.get('model'))}"
             if key in actual_costs:
                 resp['cost'] = actual_costs[key]
                 resp['cost_status'] = 'actual'
@@ -58,7 +58,7 @@ async def update_conversation_costs(conversation_id: str, generation_ids: Dict[s
     # Update stage2 costs
     if 'stage2' in assistant_msg:
         for i, rank in enumerate(assistant_msg['stage2']):
-            key = f"stage2_{rank['model']}"
+            key = f"stage2_{rank.get('model_id', rank.get('model'))}"
             if key in actual_costs:
                 rank['cost'] = actual_costs[key]
                 rank['cost_status'] = 'actual'
@@ -66,7 +66,7 @@ async def update_conversation_costs(conversation_id: str, generation_ids: Dict[s
     
     # Update stage3 cost
     if 'stage3' in assistant_msg:
-        key = f"stage3_{assistant_msg['stage3']['model']}"
+        key = f"stage3_{assistant_msg['stage3'].get('model_id', assistant_msg['stage3'].get('model'))}"
         if key in actual_costs:
             assistant_msg['stage3']['cost'] = actual_costs[key]
             assistant_msg['stage3']['cost_status'] = 'actual'

@@ -10,17 +10,23 @@ from backend.council import (
     calculate_aggregate_rankings,
     generate_conversation_title,
     run_full_council,
+    build_model_key,
 )
 
 
 @pytest.mark.asyncio
 async def test_stage1_collect_responses_success():
     """Test Stage 1 collects responses from all models."""
+    model_a = {"name": "openai/gpt-4o", "provider": "openrouter"}
+    model_b = {"name": "anthropic/claude-3-opus", "provider": "openrouter"}
     mock_responses = {
-        "openai/gpt-4o": {"content": "GPT response", "reasoning_details": None},
-        "anthropic/claude-3-opus": {
-            "content": "Claude response",
-            "reasoning_details": None,
+        build_model_key(model_a): {
+            "response": {"content": "GPT response", "reasoning_details": None},
+            "model_config": model_a,
+        },
+        build_model_key(model_b): {
+            "response": {"content": "Claude response", "reasoning_details": None},
+            "model_config": model_b,
         },
     }
 
@@ -30,6 +36,7 @@ async def test_stage1_collect_responses_success():
         results, cost, gen_ids = await stage1_collect_responses("What is AI?")
 
         assert len(results) == 2
+        assert results[0]["model_id"] == build_model_key(model_a)
         assert results[0]["model"] == "openai/gpt-4o"
         assert results[0]["response"] == "GPT response"
         assert results[1]["model"] == "anthropic/claude-3-opus"
@@ -39,10 +46,13 @@ async def test_stage1_collect_responses_success():
 @pytest.mark.asyncio
 async def test_stage1_filters_failed_responses():
     """Test Stage 1 filters out failed model responses."""
+    model_a = {"name": "openai/gpt-4o", "provider": "openrouter"}
+    model_b = {"name": "anthropic/claude-3-opus", "provider": "openrouter"}
+    model_c = {"name": "google/gemini-pro", "provider": "openrouter"}
     mock_responses = {
-        "openai/gpt-4o": {"content": "GPT response", "reasoning_details": None},
-        "anthropic/claude-3-opus": None,  # Failed
-        "google/gemini-pro": {"content": "Gemini response", "reasoning_details": None},
+        build_model_key(model_a): {"response": {"content": "GPT response", "reasoning_details": None}, "model_config": model_a},
+        build_model_key(model_b): {"response": None, "model_config": model_b},  # Failed
+        build_model_key(model_c): {"response": {"content": "Gemini response", "reasoning_details": None}, "model_config": model_c},
     }
 
     with patch("backend.council.query_models_parallel", new=AsyncMock()) as mock_query:
@@ -58,18 +68,26 @@ async def test_stage1_filters_failed_responses():
 async def test_stage2_collect_rankings_anonymizes():
     """Test Stage 2 anonymizes responses for ranking."""
     stage1_results = [
-        {"model": "openai/gpt-4o", "response": "Response 1"},
-        {"model": "anthropic/claude-3-opus", "response": "Response 2"},
+        {"model_id": "openai::default::openai/gpt-4o", "model": "openai/gpt-4o", "response": "Response 1"},
+        {"model_id": "openrouter::anthropic/claude-3-opus", "model": "anthropic/claude-3-opus", "response": "Response 2"},
     ]
 
+    model_a = {"name": "openai/gpt-4o", "provider": "openrouter"}
+    model_b = {"name": "anthropic/claude-3-opus", "provider": "openrouter"}
     mock_responses = {
-        "openai/gpt-4o": {
-            "content": "FINAL RANKING:\n1. Response B\n2. Response A",
-            "reasoning_details": None,
+        build_model_key(model_a): {
+            "response": {
+                "content": "FINAL RANKING:\n1. Response B\n2. Response A",
+                "reasoning_details": None,
+            },
+            "model_config": model_a,
         },
-        "anthropic/claude-3-opus": {
-            "content": "FINAL RANKING:\n1. Response A\n2. Response B",
-            "reasoning_details": None,
+        build_model_key(model_b): {
+            "response": {
+                "content": "FINAL RANKING:\n1. Response A\n2. Response B",
+                "reasoning_details": None,
+            },
+            "model_config": model_b,
         },
     }
 
@@ -83,8 +101,8 @@ async def test_stage2_collect_rankings_anonymizes():
         assert len(results) == 2
         assert "Response A" in label_to_model
         assert "Response B" in label_to_model
-        assert label_to_model["Response A"] == "openai/gpt-4o"
-        assert label_to_model["Response B"] == "anthropic/claude-3-opus"
+        assert label_to_model["Response A"]["model"] == "openai/gpt-4o"
+        assert label_to_model["Response B"]["model"] == "anthropic/claude-3-opus"
 
 
 @pytest.mark.asyncio
@@ -102,15 +120,23 @@ async def test_stage3_synthesize_final():
         }
     ]
 
-    with patch("backend.council.query_model", new=AsyncMock()) as mock_query:
-        mock_query.return_value = {
-            "content": "Final synthesized answer",
-            "reasoning_details": None,
-        }
+    mock_provider = AsyncMock()
+    mock_provider.query.return_value = {
+        "content": "Final synthesized answer",
+        "reasoning_details": None,
+    }
 
-        result, cost, gen_ids = await stage3_synthesize_final(
-            "What is AI?", stage1_results, stage2_results
-        )
+    fake_config = {
+        "providers": {},
+        "council_models": [],
+        "chairman_model": {"name": "mistralai/mistral-7b-instruct", "provider": "openrouter"},
+    }
+
+    with (
+        patch("backend.council.ProviderFactory.get_provider_for_model", return_value=mock_provider),
+        patch("backend.council.config_manager.get_config", return_value=fake_config),
+    ):
+        result, cost, gen_ids = await stage3_synthesize_final("What is AI?", stage1_results, stage2_results)
 
         assert result["model"] == "mistralai/mistral-7b-instruct"
         assert result["response"] == "Final synthesized answer"
@@ -128,12 +154,19 @@ async def test_stage3_handles_chairman_failure():
         }
     ]
 
-    with patch("backend.council.query_model", new=AsyncMock()) as mock_query:
-        mock_query.return_value = None
+    mock_provider = AsyncMock()
+    mock_provider.query.return_value = None
+    fake_config = {
+        "providers": {},
+        "council_models": [],
+        "chairman_model": {"name": "mistralai/mistral-7b-instruct", "provider": "openrouter"},
+    }
 
-        result, cost = await stage3_synthesize_final(
-            "What is AI?", stage1_results, stage2_results
-        )
+    with (
+        patch("backend.council.ProviderFactory.get_provider_for_model", return_value=mock_provider),
+        patch("backend.council.config_manager.get_config", return_value=fake_config),
+    ):
+        result, cost, _ = await stage3_synthesize_final("What is AI?", stage1_results, stage2_results)
 
         assert "Error" in result["response"]
 
@@ -271,23 +304,40 @@ def test_calculate_aggregate_rankings_with_missing_labels():
 @pytest.mark.asyncio
 async def test_generate_conversation_title_success():
     """Test generating conversation title."""
-    with patch("backend.council.query_model", new=AsyncMock()) as mock_query:
-        mock_query.return_value = {
-            "content": "Understanding Artificial Intelligence",
-            "reasoning_details": None,
-        }
+    mock_provider = AsyncMock()
+    mock_provider.query.return_value = {
+        "content": "Understanding Artificial Intelligence",
+        "reasoning_details": None,
+    }
+    fake_config = {
+        "providers": {},
+        "council_models": [],
+        "chairman_model": {"name": "title-model", "provider": "openrouter"},
+    }
 
+    with (
+        patch("backend.council.ProviderFactory.get_provider_for_model", return_value=mock_provider),
+        patch("backend.council.config_manager.get_config", return_value=fake_config),
+    ):
         title = await generate_conversation_title("What is AI?")
-
         assert title == "Understanding Artificial Intelligence"
 
 
 @pytest.mark.asyncio
 async def test_generate_conversation_title_fallback():
     """Test generating conversation title falls back on failure."""
-    with patch("backend.council.query_model", new=AsyncMock()) as mock_query:
-        mock_query.return_value = None
+    mock_provider = AsyncMock()
+    mock_provider.query.return_value = None
+    fake_config = {
+        "providers": {},
+        "council_models": [],
+        "chairman_model": {"name": "title-model", "provider": "openrouter"},
+    }
 
+    with (
+        patch("backend.council.ProviderFactory.get_provider_for_model", return_value=mock_provider),
+        patch("backend.council.config_manager.get_config", return_value=fake_config),
+    ):
         title = await generate_conversation_title("What is AI?")
 
         assert title == "New Conversation"
@@ -296,26 +346,43 @@ async def test_generate_conversation_title_fallback():
 @pytest.mark.asyncio
 async def test_generate_conversation_title_strips_quotes():
     """Test title generation strips quotes."""
-    with patch("backend.council.query_model", new=AsyncMock()) as mock_query:
-        mock_query.return_value = {
-            "content": '"Understanding AI"',
-            "reasoning_details": None,
-        }
+    mock_provider = AsyncMock()
+    mock_provider.query.return_value = {
+        "content": '"Understanding AI"',
+        "reasoning_details": None,
+    }
+    fake_config = {
+        "providers": {},
+        "council_models": [],
+        "chairman_model": {"name": "title-model", "provider": "openrouter"},
+    }
 
+    with (
+        patch("backend.council.ProviderFactory.get_provider_for_model", return_value=mock_provider),
+        patch("backend.council.config_manager.get_config", return_value=fake_config),
+    ):
         title = await generate_conversation_title("What is AI?")
-
         assert title == "Understanding AI"
 
 
 @pytest.mark.asyncio
 async def test_generate_conversation_title_truncates_long():
     """Test title generation truncates long titles."""
-    with patch("backend.council.query_model", new=AsyncMock()) as mock_query:
-        mock_query.return_value = {
-            "content": "A" * 60,  # Very long title
-            "reasoning_details": None,
-        }
+    mock_provider = AsyncMock()
+    mock_provider.query.return_value = {
+        "content": "A" * 60,  # Very long title
+        "reasoning_details": None,
+    }
+    fake_config = {
+        "providers": {},
+        "council_models": [],
+        "chairman_model": {"name": "title-model", "provider": "openrouter"},
+    }
 
+    with (
+        patch("backend.council.ProviderFactory.get_provider_for_model", return_value=mock_provider),
+        patch("backend.council.config_manager.get_config", return_value=fake_config),
+    ):
         title = await generate_conversation_title("What is AI?")
 
         assert len(title) == 50
