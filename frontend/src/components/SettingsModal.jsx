@@ -394,60 +394,61 @@ function SettingsModal({ isOpen, onClose }) {
                             <button className="add-button" onClick={addCouncilModel}>+ Add Model</button>
                         </div>
 
-                        <div className="form-group">
-                            <label>Chairman Model</label>
-                            <p className="section-help">The model that synthesizes the final answer based on council input.</p>
-                            <div className="model-row-container">
-                                <div className="model-row">
-                                    <select
-                                        value={config.chairman_model?.provider || 'ollama'}
-                                        onChange={(e) => setConfig({
-                                            ...config,
-                                            chairman_model: {
-                                                ...config.chairman_model,
-                                                provider: e.target.value
-                                            }
-                                        })}
-                                        className="provider-select"
-                                    >
-                                        {PROVIDERS.map(p => (
-                                            <option key={p.id} value={p.id}>{p.name}</option>
-                                        ))}
-                                    </select>
-                                    <input
-                                        type="text"
-                                        value={config.chairman_model?.name || ''}
-                                        onChange={(e) => setConfig({
-                                            ...config,
-                                            chairman_model: {
-                                                ...config.chairman_model,
-                                                name: e.target.value
-                                            }
-                                        })}
-                                        placeholder={
-                                            config.chairman_model?.provider === 'openrouter'
-                                                ? 'e.g., anthropic/claude-3.5-sonnet'
-                                                : config.chairman_model?.provider === 'ollama'
-                                                    ? 'e.g., deepseek-r1:1.5b'
-                                                    : 'Model name'
+                        <hr />
+
+                        <h3>Chairman Model</h3>
+                        <p className="section-help">The model that synthesizes the final answer based on council input.</p>
+                        <div className="model-row-container">
+                            <div className="model-row">
+                                <select
+                                    value={config.chairman_model?.provider || 'ollama'}
+                                    onChange={(e) => setConfig({
+                                        ...config,
+                                        chairman_model: {
+                                            ...config.chairman_model,
+                                            provider: e.target.value
                                         }
-                                        list={`available-models-${config.chairman_model?.provider || 'ollama'}`}
-                                    />
-                                </div>
-                                {(() => {
-                                    const help = getProviderHelp(config.chairman_model?.provider || 'ollama');
-                                    return help.text && (
-                                        <div className="model-help">
-                                            <small>
-                                                {help.text} {help.link && (
-                                                    <a href={help.link} target="_blank" rel="noopener noreferrer">{help.linkText}</a>
-                                                )}
-                                            </small>
-                                        </div>
-                                    );
-                                })()}
+                                    })}
+                                    className="provider-select"
+                                >
+                                    {PROVIDERS.map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </select>
+                                <input
+                                    type="text"
+                                    value={config.chairman_model?.name || ''}
+                                    onChange={(e) => setConfig({
+                                        ...config,
+                                        chairman_model: {
+                                            ...config.chairman_model,
+                                            name: e.target.value
+                                        }
+                                    })}
+                                    placeholder={
+                                        config.chairman_model?.provider === 'openrouter'
+                                            ? 'e.g., anthropic/claude-3.5-sonnet'
+                                            : config.chairman_model?.provider === 'ollama'
+                                                ? 'e.g., deepseek-r1:1.5b'
+                                                : 'Model name'
+                                    }
+                                    list={`available-models-${config.chairman_model?.provider || 'ollama'}`}
+                                />
                             </div>
+                            {(() => {
+                                const help = getProviderHelp(config.chairman_model?.provider || 'ollama');
+                                return help.text && (
+                                    <div className="model-help">
+                                        <small>
+                                            {help.text} {help.link && (
+                                                <a href={help.link} target="_blank" rel="noopener noreferrer">{help.linkText}</a>
+                                            )}
+                                        </small>
+                                    </div>
+                                );
+                            })()}
                         </div>
+
 
                         {/* Datalists for autocomplete */}
                         {Object.entries(availableModels).map(([provider, models]) => (
