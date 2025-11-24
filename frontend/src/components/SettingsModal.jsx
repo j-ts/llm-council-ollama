@@ -55,6 +55,10 @@ function SettingsModal({ isOpen, onClose }) {
                 data.providers.openai = [];
             }
 
+            if (typeof data.serialize_local_models !== 'boolean') {
+                data.serialize_local_models = false;
+            }
+
             setConfig(data);
             loadAllModels();
         } catch (error) {
@@ -66,6 +70,7 @@ function SettingsModal({ isOpen, onClose }) {
                     openrouter: { api_key: '' },
                     openai: [{ name: 'Default', base_url: 'https://api.openai.com/v1', api_key: '' }]
                 },
+                serialize_local_models: false,
                 council_models: [],
                 chairman_model: { name: '', provider: 'ollama' }
             });
@@ -358,6 +363,22 @@ function SettingsModal({ isOpen, onClose }) {
                                             />
                                             <small>
                                                 Ensure Ollama is running. <a href="https://ollama.com/library" target="_blank" rel="noopener noreferrer">Browse models</a>
+                                            </small>
+                                        </div>
+                                        <div className="form-group checkbox-row">
+                                            <label className="checkbox-label">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!config.serialize_local_models}
+                                                    onChange={(e) => setConfig({
+                                                        ...config,
+                                                        serialize_local_models: e.target.checked
+                                                    })}
+                                                />
+                                                Run local models one after another (serialize Ollama calls)
+                                            </label>
+                                            <small>
+                                                Prevents GPU thrash by queuing Ollama requests instead of running them in parallel.
                                             </small>
                                         </div>
                                     </div>

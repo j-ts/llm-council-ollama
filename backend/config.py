@@ -69,6 +69,13 @@ class ConfigManager:
         self.config_file = config_file
         self._config = self._load_config()
 
+    @staticmethod
+    def _ensure_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Add default keys that may be missing from older config files."""
+        if "serialize_local_models" not in config:
+            config["serialize_local_models"] = False
+        return config
+
     def _migrate_old_config(self, old_config: Dict[str, Any]) -> Dict[str, Any]:
         """Migrate old single-provider config to new multi-provider format."""
         
@@ -151,12 +158,13 @@ class ConfigManager:
                 with open(self.config_file, 'r') as f:
                     loaded_config = json.load(f)
                     # Migrate if necessary
-                    return self._migrate_old_config(loaded_config)
+                    migrated = self._migrate_old_config(loaded_config)
+                    return self._ensure_defaults(migrated)
             except Exception as e:
                 print(f"Error loading config file: {e}")
         
         # Default configuration (new format)
-        return {
+        return self._ensure_defaults({
             "providers": {
                 "ollama": {
                     "base_url": "http://localhost:11434"
@@ -180,7 +188,7 @@ class ConfigManager:
                 "name": CHAIRMAN_MODEL,
                 "provider": "openrouter"
             }
-        }
+        })
 
     def get_config(self) -> Dict[str, Any]:
         """Get current configuration."""

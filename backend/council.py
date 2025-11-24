@@ -42,10 +42,14 @@ def build_model_display_name(model_config: Dict[str, Any]) -> str:
 async def query_models_parallel(
     model_configs: List[Dict[str, Any]],
     providers_config: Dict[str, Any],
-    messages: List[Dict[str, str]]
+    messages: List[Dict[str, str]],
+    serialize_ollama: bool = False
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Query multiple models in parallel, each with their own provider.
+    Query multiple models, each with their own provider.
+
+    When serialize_ollama is True, Ollama-backed models are processed one after
+    another to avoid GPU thrashing; non-Ollama models still run concurrently.
     """
     async def query_safe(model_config):
         try:
@@ -57,18 +61,35 @@ async def query_models_parallel(
             print(f"Error querying model {model_config.get('name')}: {error_message}")
             return {"response": None, "error": error_message}
 
-    tasks = [query_safe(model_config) for model_config in model_configs]
-    responses = await asyncio.gather(*tasks)
-    
-    # Map responses by stable model key to avoid collisions across providers/configs
     result = {}
-    for model_config, response in zip(model_configs, responses):
+
+    def _store(model_config, response):
         key = build_model_key(model_config)
         result[key] = {
             "response": response.get("response") if isinstance(response, dict) else None,
             "error": response.get("error") if isinstance(response, dict) else "Unknown error",
             "model_config": model_config
         }
+
+    if serialize_ollama:
+        ollama_models = [mc for mc in model_configs if mc.get("provider") == "ollama"]
+        other_models = [mc for mc in model_configs if mc.get("provider") != "ollama"]
+
+        if other_models:
+            other_tasks = [query_safe(model_config) for model_config in other_models]
+            other_responses = await asyncio.gather(*other_tasks)
+            for model_config, response in zip(other_models, other_responses):
+                _store(model_config, response)
+
+        # Run local/Ollama models one at a time to limit simultaneous GPU pressure
+        for model_config in ollama_models:
+            response = await query_safe(model_config)
+            _store(model_config, response)
+    else:
+        tasks = [query_safe(model_config) for model_config in model_configs]
+        responses = await asyncio.gather(*tasks)
+        for model_config, response in zip(model_configs, responses):
+            _store(model_config, response)
     
     return result
 
@@ -79,11 +100,17 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
     config = config_manager.get_config()
     providers_config = config.get("providers", {})
     council_models = config.get("council_models", [])
+    serialize_ollama = config.get("serialize_local_models", False)
 
     messages = [{"role": "user", "content": user_query}]
 
     # Query all models in parallel (each with their own provider)
-    responses = await query_models_parallel(council_models, providers_config, messages)
+    responses = await query_models_parallel(
+        council_models,
+        providers_config,
+        messages,
+        serialize_ollama=serialize_ollama
+    )
 
     # Format results and collect costs + generation IDs
     stage1_results = []
@@ -148,6 +175,7 @@ async def stage2_collect_rankings(
     config = config_manager.get_config()
     providers_config = config.get("providers", {})
     council_models = config.get("council_models", [])
+    serialize_ollama = config.get("serialize_local_models", False)
 
     valid_stage1_results = [result for result in stage1_results if not result.get("error")]
     if not valid_stage1_results:
@@ -208,7 +236,12 @@ Now provide your evaluation and ranking:"""
     messages = [{"role": "user", "content": ranking_prompt}]
 
     # Get rankings from all council models in parallel
-    responses = await query_models_parallel(council_models, providers_config, messages)
+    responses = await query_models_parallel(
+        council_models,
+        providers_config,
+        messages,
+        serialize_ollama=serialize_ollama
+    )
 
     # Format results and collect costs + generation IDs
     stage2_results = []
