@@ -8,6 +8,7 @@ export default function Stage3({ finalResponse }) {
 
   const cost = finalResponse.cost || 0;
   const displayName = finalResponse.model_display || finalResponse.model || 'Chairman';
+  const hasError = Boolean(finalResponse.error);
 
   return (
     <div className="stage stage3">
@@ -19,9 +20,16 @@ export default function Stage3({ finalResponse }) {
         <div className="chairman-label">
           Chairman: {displayName}
         </div>
-        <div className="final-text markdown-content">
-          <ReactMarkdown>{finalResponse.response}</ReactMarkdown>
-        </div>
+        {hasError ? (
+          <div className="stage-error">
+            <strong>Failed to generate final answer.</strong>
+            <p>{finalResponse.response}</p>
+          </div>
+        ) : (
+          <div className="final-text markdown-content">
+            <ReactMarkdown>{finalResponse.response}</ReactMarkdown>
+          </div>
+        )}
       </div>
     </div>
   );

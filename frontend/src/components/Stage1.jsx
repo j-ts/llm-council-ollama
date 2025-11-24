@@ -24,20 +24,31 @@ export default function Stage1({ responses, stageCost }) {
         {responses.map((resp, index) => (
           <button
             key={resp.model_id || resp.model || index}
-            className={`tab ${activeTab === index ? 'active' : ''}`}
+            className={`tab ${activeTab === index ? 'active' : ''} ${resp.error ? 'tab-error' : ''}`}
             onClick={() => setActiveTab(index)}
           >
             <span className="tab-model">{getDisplayName(resp)}</span>
-            {resp.cost > 0 && <span className="tab-cost">${resp.cost.toFixed(4)}</span>}
+            {resp.error ? (
+              <span className="tab-error-label">Error</span>
+            ) : (
+              resp.cost > 0 && <span className="tab-cost">${resp.cost.toFixed(4)}</span>
+            )}
           </button>
         ))}
       </div>
 
       <div className="tab-content">
         <div className="model-name">{getDisplayName(responses[activeTab])}</div>
-        <div className="response-text markdown-content">
-          <ReactMarkdown>{responses[activeTab].response}</ReactMarkdown>
-        </div>
+        {responses[activeTab].error ? (
+          <div className="stage-error">
+            <strong>Model failed to respond.</strong>
+            <p>{responses[activeTab].error}</p>
+          </div>
+        ) : (
+          <div className="response-text markdown-content">
+            <ReactMarkdown>{responses[activeTab].response}</ReactMarkdown>
+          </div>
+        )}
       </div>
     </div>
   );

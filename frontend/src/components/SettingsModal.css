@@ -388,3 +388,73 @@ h3 {
     padding: 40px;
     color: var(--text-secondary);
 }
+
+/* OpenAI Configs List */
+.openai-configs-list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    margin-top: 15px;
+}
+
+.openai-config-item {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 15px;
+}
+
+.openai-config-header {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.config-name-input {
+    flex: 1;
+    font-weight: 500;
+}
+
+.remove-config-button {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 18px;
+    padding: 0 10px;
+}
+
+.remove-config-button:hover {
+    color: #ff4444;
+}
+
+.add-config-button {
+    width: 100%;
+    padding: 8px;
+    background: none;
+    border: 1px dashed var(--border-color);
+    color: var(--accent-color);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.add-config-button:hover {
+    background-color: rgba(var(--accent-rgb), 0.05);
+    border-color: var(--accent-color);
+}
+
+.openai-config-select {
+    width: 150px;
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.openai-config-select:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}

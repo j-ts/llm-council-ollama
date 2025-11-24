@@ -53,11 +53,15 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, stag
         {rankings.map((rank, index) => (
           <button
             key={rank.model_id || rank.model || index}
-            className={`tab ${activeTab === index ? 'active' : ''}`}
+            className={`tab ${activeTab === index ? 'active' : ''} ${rank.error ? 'tab-error' : ''}`}
             onClick={() => setActiveTab(index)}
           >
             <span className="tab-model">{getModelName(rank)}</span>
-            {rank.cost > 0 && <span className="tab-cost">${rank.cost.toFixed(4)}</span>}
+            {rank.error ? (
+              <span className="tab-error-label">Error</span>
+            ) : (
+              rank.cost > 0 && <span className="tab-cost">${rank.cost.toFixed(4)}</span>
+            )}
           </button>
         ))}
       </div>
@@ -66,13 +70,21 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, stag
         <div className="ranking-model">
           {getModelName(rankings[activeTab])}
         </div>
-        <div className="ranking-content markdown-content">
-          <ReactMarkdown>
-            {deAnonymizeText(rankings[activeTab].ranking, labelToModel)}
-          </ReactMarkdown>
-        </div>
+        {rankings[activeTab].error ? (
+          <div className="stage-error">
+            <strong>Ranking failed.</strong>
+            <p>{rankings[activeTab].error}</p>
+          </div>
+        ) : (
+          <div className="ranking-content markdown-content">
+            <ReactMarkdown>
+              {deAnonymizeText(rankings[activeTab].ranking, labelToModel)}
+            </ReactMarkdown>
+          </div>
+        )}
 
-        {rankings[activeTab].parsed_ranking &&
+        {!rankings[activeTab].error &&
+         rankings[activeTab].parsed_ranking &&
          rankings[activeTab].parsed_ranking.length > 0 && (
           <div className="parsed-ranking">
             <strong>Extracted Ranking:</strong>
