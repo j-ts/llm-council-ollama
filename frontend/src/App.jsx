@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useParams, Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatInterface from './components/ChatInterface';
@@ -12,8 +12,23 @@ function ConversationView() {
   const navigate = useNavigate();
   const [conversations, setConversations] = useState([]);
   const [currentConversation, setCurrentConversation] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loadingConversations, setLoadingConversations] = useState({});
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const setConversationLoading = useCallback((convId, loading) => {
+    if (!convId) return;
+    setLoadingConversations((prev) => {
+      if (loading) {
+        if (prev[convId]) return prev;
+        return { ...prev, [convId]: true };
+      }
+      if (!prev[convId]) return prev;
+      const next = { ...prev };
+      delete next[convId];
+      return next;
+    });
+  }, []);
+  const isCurrentConversationLoading = conversationId ? !!loadingConversations[conversationId] : false;
 
   // Load conversations on mount
   useEffect(() => {
@@ -76,6 +91,7 @@ function ConversationView() {
 
       // Remove from conversations list
       setConversations(conversations.filter(c => c.id !== convId));
+      setConversationLoading(convId, false);
 
       // If current conversation was deleted, navigate to home
       if (conversationId === convId) {
@@ -96,7 +112,7 @@ function ConversationView() {
 
     if (jobsForConv.length > 0) {
       // Set loading state for this conversation
-      setIsLoading(true);
+      setConversationLoading(conversationId, true);
 
       jobsForConv.forEach(([jobId, convId]) => {
         pollJobStatus(jobId, convId);
@@ -120,7 +136,7 @@ function ConversationView() {
           if (conversationId) {
             await loadConversation(conversationId);
           }
-          setIsLoading(false);
+          setConversationLoading(conversationId, false);
           loadConversations();
         } else if (job.status === 'failed') {
           clearInterval(pollInterval);
@@ -139,12 +155,12 @@ function ConversationView() {
             await loadConversation(conversationId);
           }
 
-          setIsLoading(false);
+          setConversationLoading(conversationId, false);
         } else {
           // Still processing - update UI
           if (conversationId) {
             setCurrentConversation((prev) => {
-              if (!prev) return prev;
+              if (!prev || prev.id !== conversationId) return prev;
               const messages = [...prev.messages];
               // Find the message with this jobId
               const msgIndex = messages.findIndex(m => m.role === 'assistant' && m.jobId === jobId);
@@ -178,7 +194,7 @@ function ConversationView() {
   const handleSendMessage = async (content) => {
     if (!conversationId) return;
 
-    setIsLoading(true);
+    setConversationLoading(conversationId, true);
     try {
       // Optimistically add user message to UI
       const userMessage = { role: 'user', content };
@@ -222,14 +238,14 @@ function ConversationView() {
         ...prev,
         messages: prev.messages.slice(0, -2),
       }));
-      setIsLoading(false);
+      setConversationLoading(conversationId, false);
     }
   };
 
   const handleSendMessageOld = async (content) => {
     if (!conversationId) return;
 
-    setIsLoading(true);
+    setConversationLoading(conversationId, true);
     try {
       // Optimistically add user message to UI
       const userMessage = { role: 'user', content };
@@ -327,12 +343,12 @@ function ConversationView() {
           case 'complete':
             // Stream complete, reload conversations list
             loadConversations();
-            setIsLoading(false);
+            setConversationLoading(conversationId, false);
             break;
 
           case 'error':
             console.error('Stream error:', event.message);
-            setIsLoading(false);
+            setConversationLoading(conversationId, false);
             break;
 
           default:
@@ -346,7 +362,7 @@ function ConversationView() {
         ...prev,
         messages: prev.messages.slice(0, -2),
       }));
-      setIsLoading(false);
+      setConversationLoading(conversationId, false);
     }
   };
 
@@ -379,7 +395,7 @@ function ConversationView() {
         <ChatInterface
           conversation={currentConversation}
           onSendMessage={handleSendMessage}
-          isLoading={isLoading}
+          isLoading={isCurrentConversationLoading}
         />
         <SettingsModal
           isOpen={settingsOpen}
