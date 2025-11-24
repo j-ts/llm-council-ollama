@@ -48,6 +48,8 @@ The project uses [uv](https://docs.astral.sh/uv/) for Python dependency manageme
 **Backend:**
 ```bash
 uv sync
+# or
+pip install -r requirements.txt
 ```
 
 **Frontend:**
@@ -57,10 +59,28 @@ npm install
 cd ..
 ```
 
+**Redis (Required):**
+
+The backend enqueues work via Redis using RQ. You need a Redis server running locally (or accessible via network) before starting the app.
+
+```bash
+# macOS (Homebrew)
+brew install redis
+redis-server --port 6380
+```
+
+Or run it via Docker:
+
+```bash
+docker run -d --name llm-council-redis -p 6380:6379 redis:7-alpine
+```
+
 ### 2. Configure API Key
 Create a `.env` file in the project root:
 ```bash
 OPENROUTER_API_KEY=sk-or-v1-...
+REDIS_HOST=localhost
+REDIS_PORT=6380
 ```
 Get your API key at [openrouter.ai](https://openrouter.ai/).
 
@@ -84,9 +104,9 @@ The app starts with a default configuration using free OpenRouter models. You ca
 ### 4. (Optional) Docker Deployment
 A simple Dockerfile is provided. To build and run:
 ```bash
-docker build -t llm-council .
-docker run -p 5173:5173 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY llm-council
+docker compose up --build
 ```
+This brings up Redis, the backend, the background worker, and the frontend.
 
 ---
 
@@ -98,6 +118,16 @@ docker run -p 5173:5173 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY llm-council
 ```
 
 **Option 2: Run manually**
+
+Start Redis (if you didn't already):
+```bash
+redis-server --port 6380
+```
+
+Run the background worker:
+```bash
+uv run rq worker council --url redis://localhost:6380/0
+```
 
 Backend:
 ```bash
