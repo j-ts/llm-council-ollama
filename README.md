@@ -28,7 +28,8 @@ This project was 99% *vibe‑coded* as a fun Saturday hack while exploring side�
 
 ## 🎨 New Features (Recent Changes)
 
-- **Dark Theme** – A sleek dark UI is now the default. See the demo below.
+- **Dark Theme** – A sleek dark UI is now the default.
+- **Sidebar Background Fix** – The sidebar now respects the dark theme, fixing the white background issue.
 - **Free OpenRouter Models** – The default configuration now uses free‑tier OpenRouter models, lowering the barrier to try the app out of the box.
 - **Docker Setup** – A minimal Dockerfile and compose script have been added for quick containerised deployment.
 

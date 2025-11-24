@@ -2,7 +2,7 @@
  * API client for the LLM Council backend.
  */
 
-const API_BASE = `http://${window.location.hostname}:8002`;
+const API_BASE = `http://${window.location.hostname}:8001`;
 
 export const api = {
   /**
