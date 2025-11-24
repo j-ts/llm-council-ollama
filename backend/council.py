@@ -255,7 +255,7 @@ def calculate_aggregate_rankings(
             )
 
     # Sort by average rank (lower is better)
-    aggregate.sort(key=lambda x: cast(float, x["average_rank"]))
+    aggregate.sort(key=lambda x: x["average_rank"])
 
     return aggregate
 
