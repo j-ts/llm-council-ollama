@@ -19,7 +19,8 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #f5f5f5;
+  background: #000000;
+  color: #00ff00;
 }
 
 #root {
@@ -70,7 +71,8 @@ body {
 }
 
 .markdown-content pre {
-  background: #f5f5f5;
+  background: #222;
+  color: #f5f5f5;
   padding: 12px;
   border-radius: 4px;
   overflow-x: auto;
@@ -78,7 +80,8 @@ body {
 }
 
 .markdown-content code {
-  background: #f5f5f5;
+  background: #222;
+  color: #f5f5f5;
   padding: 2px 6px;
   border-radius: 3px;
   font-family: monospace;
@@ -93,6 +96,6 @@ body {
 .markdown-content blockquote {
   margin: 0 0 12px 0;
   padding-left: 16px;
-  border-left: 4px solid #ddd;
-  color: #666;
+  border-left: 4px solid #444;
+  color: #aaa;
 }
