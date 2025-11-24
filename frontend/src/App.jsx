@@ -1,26 +1,32 @@
 import { useState, useEffect } from 'react';
+import { useNavigate, useParams, Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatInterface from './components/ChatInterface';
+import { ThemeProvider } from './contexts/ThemeContext';
 import { api } from './api';
 import './App.css';
 
-function App() {
+function ConversationView() {
+  const { conversationId } = useParams();
+  const navigate = useNavigate();
   const [conversations, setConversations] = useState([]);
-  const [currentConversationId, setCurrentConversationId] = useState(null);
   const [currentConversation, setCurrentConversation] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Load conversations on mount
   useEffect(() => {
     loadConversations();
   }, []);
 
-  // Load conversation details when selected
+  // Load conversation details when URL changes
   useEffect(() => {
-    if (currentConversationId) {
-      loadConversation(currentConversationId);
+    if (conversationId) {
+      loadConversation(conversationId);
+    } else {
+      setCurrentConversation(null);
     }
-  }, [currentConversationId]);
+  }, [conversationId]);
 
   const loadConversations = async () => {
     try {
@@ -47,31 +53,32 @@ function App() {
         { id: newConv.id, created_at: newConv.created_at, message_count: 0 },
         ...conversations,
       ]);
-      setCurrentConversationId(newConv.id);
+      navigate(`/c/${newConv.id}`); // Navigate to new conversation URL
+      setSidebarOpen(false); // Close sidebar on mobile after creating new conversation
     } catch (error) {
       console.error('Failed to create conversation:', error);
     }
   };
 
   const handleSelectConversation = (id) => {
-    setCurrentConversationId(id);
+    navigate(`/c/${id}`); // Navigate to conversation URL
+    setSidebarOpen(false); // Close sidebar on mobile after selecting
   };
 
-  const handleDeleteConversation = async (conversationId) => {
+  const handleDeleteConversation = async (convId) => {
     if (!confirm('Are you sure you want to delete this conversation?')) {
       return;
     }
     
     try {
-      await api.deleteConversation(conversationId);
+      await api.deleteConversation(convId);
       
       // Remove from conversations list
-      setConversations(conversations.filter(c => c.id !== conversationId));
+      setConversations(conversations.filter(c => c.id !== convId));
       
-      // If current conversation was deleted, clear it
-      if (currentConversationId === conversationId) {
-        setCurrentConversationId(null);
-        setCurrentConversation(null);
+      // If current conversation was deleted, navigate to home
+      if (conversationId === convId) {
+        navigate('/');
       }
     } catch (error) {
       console.error('Failed to delete conversation:', error);
@@ -81,10 +88,10 @@ function App() {
 
   // Check for pending jobs on mount and resume polling
   useEffect(() => {
-    if (!currentConversationId) return;
+    if (!conversationId) return;
     
     const pendingJobs = JSON.parse(localStorage.getItem('pendingJobs') || '{}');
-    const jobsForConv = Object.entries(pendingJobs).filter(([_, convId]) => convId === currentConversationId);
+    const jobsForConv = Object.entries(pendingJobs).filter(([_, convId]) => convId === conversationId);
     
     if (jobsForConv.length > 0) {
       // Set loading state for this conversation
@@ -94,7 +101,7 @@ function App() {
         pollJobStatus(jobId, convId);
       });
     }
-  }, [currentConversationId]);
+  }, [conversationId]);
 
   const pollJobStatus = async (jobId, conversationId) => {
     const pollInterval = setInterval(async () => {
@@ -109,7 +116,7 @@ function App() {
           localStorage.setItem('pendingJobs', JSON.stringify(pendingJobs));
           
           // Reload conversation to show result
-          if (conversationId === currentConversationId) {
+          if (conversationId) {
             await loadConversation(conversationId);
           }
           setIsLoading(false);
@@ -127,14 +134,14 @@ function App() {
           }
           
           // Reload conversation to update UI
-          if (conversationId === currentConversationId) {
+          if (conversationId) {
             await loadConversation(conversationId);
           }
           
           setIsLoading(false);
         } else {
-          // Still processing - update UI if on same conversation
-          if (conversationId === currentConversationId) {
+          // Still processing - update UI
+          if (conversationId) {
             setCurrentConversation((prev) => {
               if (!prev) return prev;
               const messages = [...prev.messages];
@@ -168,7 +175,7 @@ function App() {
   };
 
   const handleSendMessage = async (content) => {
-    if (!currentConversationId) return;
+    if (!conversationId) return;
 
     setIsLoading(true);
     try {
@@ -180,7 +187,7 @@ function App() {
       }));
 
       // Send message for async processing first
-      const { job_id } = await api.sendMessageAsync(currentConversationId, content);
+      const { job_id } = await api.sendMessageAsync(conversationId, content);
       
       // Create a partial assistant message showing it's processing
       const assistantMessage = {
@@ -201,11 +208,11 @@ function App() {
       
       // Store job_id in localStorage for recovery after browser close
       const pendingJobs = JSON.parse(localStorage.getItem('pendingJobs') || '{}');
-      pendingJobs[job_id] = currentConversationId;
+      pendingJobs[job_id] = conversationId;
       localStorage.setItem('pendingJobs', JSON.stringify(pendingJobs));
       
       // Start polling for job status
-      pollJobStatus(job_id, currentConversationId);
+      pollJobStatus(job_id, conversationId);
 
     } catch (error) {
       console.error('Failed to send message:', error);
@@ -219,7 +226,7 @@ function App() {
   };
 
   const handleSendMessageOld = async (content) => {
-    if (!currentConversationId) return;
+    if (!conversationId) return;
 
     setIsLoading(true);
     try {
@@ -251,7 +258,7 @@ function App() {
       }));
 
       // Send message with streaming
-      await api.sendMessageStream(currentConversationId, content, (eventType, event) => {
+      await api.sendMessageStream(conversationId, content, (eventType, event) => {
         switch (eventType) {
           case 'stage1_start':
             setCurrentConversation((prev) => {
@@ -343,20 +350,47 @@ function App() {
   };
 
   return (
-    <div className="app">
-      <Sidebar
-        conversations={conversations}
-        currentConversationId={currentConversationId}
-        onSelectConversation={handleSelectConversation}
-        onNewConversation={handleNewConversation}
-        onDeleteConversation={handleDeleteConversation}
-      />
-      <ChatInterface
-        conversation={currentConversation}
-        onSendMessage={handleSendMessage}
-        isLoading={isLoading}
-      />
-    </div>
+    <ThemeProvider>
+      <div className="app">
+        {/* Hamburger menu button - mobile only */}
+        <button 
+          className={`hamburger-menu ${sidebarOpen ? 'open' : ''}`}
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          aria-label="Toggle menu"
+        >
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+
+        <Sidebar
+          conversations={conversations}
+          currentConversationId={conversationId}
+          onSelectConversation={handleSelectConversation}
+          onNewConversation={handleNewConversation}
+          onDeleteConversation={handleDeleteConversation}
+          isOpen={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+        />
+        <ChatInterface
+          conversation={currentConversation}
+          onSendMessage={handleSendMessage}
+          isLoading={isLoading}
+        />
+      </div>
+    </ThemeProvider>
+  );
+}
+
+function App() {
+  return (
+    <ThemeProvider>
+      <Routes>
+        <Route path="/" element={<ConversationView />} />
+        <Route path="/c/:conversationId" element={<ConversationView />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </ThemeProvider>
   );
 }
 

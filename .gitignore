@@ -1,31 +1,27 @@
-# Python-generated files
+# Python
 __pycache__/
-*.py[oc]
-build/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
 dist/
-wheels/
-*.egg-info
+build/
 
-# Virtual environments
-.venv
+# Virtual environment
+.venv/
+venv/
+ENV/
 
-# Keys and secrets
+# Environment variables
 .env
 
-# Data files
+# Data
 data/
+
+# Logs
+*.log
 
 # Frontend
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
-
-# Documentation
-BACKGROUND-MODE.md
-IMPROVEMENTS.md
-
-# Logs
-*.log
-backend.log
-worker.log
-frontend/frontend.log

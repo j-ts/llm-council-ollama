@@ -29,3 +29,34 @@ DATA_DIR = "data/conversations"
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6380"))
 REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}"
+
+# Model pricing (USD per 1M tokens) - Updated from OpenRouter
+# Used for estimated cost calculation (actual cost fetched from generation API)
+MODEL_PRICING = {
+    # Pricing from OpenRouter API (updated 2025-11-24)
+    "openai/gpt-5.1": {"input": 1.25, "output": 10.00},
+    "google/gemini-3-pro-preview": {"input": 2.00, "output": 12.00},
+    "anthropic/claude-sonnet-4.5": {"input": 3.00, "output": 15.00},
+    "x-ai/grok-4": {"input": 3.00, "output": 15.00},
+    "google/gemini-2.5-flash": {"input": 0.30, "output": 2.50},  # Used for title generation only
+}
+
+DEFAULT_PRICING = {"input": 1.00, "output": 3.00}  # Fallback for unknown models
+
+def calculate_estimated_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """
+    Calculate estimated cost based on token usage.
+    This is an approximation - actual cost will be fetched from OpenRouter generation API.
+    
+    Args:
+        model: Model identifier
+        prompt_tokens: Number of input tokens
+        completion_tokens: Number of output tokens
+    
+    Returns:
+        Estimated cost in USD
+    """
+    pricing = MODEL_PRICING.get(model, DEFAULT_PRICING)
+    input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
+    output_cost = (completion_tokens / 1_000_000) * pricing["output"]
+    return input_cost + output_cost

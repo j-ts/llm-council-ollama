@@ -22,15 +22,10 @@ app = FastAPI(title="LLM Council API")
 redis_conn = Redis.from_url(REDIS_URL)
 task_queue = Queue("council", connection=redis_conn)
 
-# Enable CORS for local development
+# Enable CORS for local and network development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", 
-        "http://localhost:3000",
-        "http://192.168.2.105:5173",
-        "http://192.168.2.105:3000"
-    ],
+    allow_origins=["*"],  # Allow all origins for development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -53,6 +48,7 @@ class ConversationMetadata(BaseModel):
     created_at: str
     title: str
     message_count: int
+    total_cost: float
 
 
 class Conversation(BaseModel):
@@ -126,7 +122,7 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         storage.update_conversation_title(conversation_id, title)
 
     # Run the 3-stage council process
-    stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
+    stage1_results, stage2_results, stage3_result, metadata, total_cost = await run_full_council(
         request.content
     )
 
@@ -137,13 +133,17 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         stage2_results,
         stage3_result
     )
+    
+    # Update conversation cost
+    storage.add_cost_to_conversation(conversation_id, total_cost)
 
     # Return the complete response with metadata
     return {
         "stage1": stage1_results,
         "stage2": stage2_results,
         "stage3": stage3_result,
-        "metadata": metadata
+        "metadata": metadata,
+        "cost": total_cost
     }
 
 
@@ -232,20 +232,26 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             if is_first_message:
                 title_task = asyncio.create_task(generate_conversation_title(request.content))
 
+            # Track total cost
+            total_cost = 0.0
+            
             # Stage 1: Collect responses
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-            stage1_results = await stage1_collect_responses(request.content)
+            stage1_results, stage1_cost = await stage1_collect_responses(request.content)
+            total_cost += stage1_cost
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
             # Stage 2: Collect rankings
             yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-            stage2_results, label_to_model = await stage2_collect_rankings(request.content, stage1_results)
+            stage2_results, label_to_model, stage2_cost = await stage2_collect_rankings(request.content, stage1_results)
+            total_cost += stage2_cost
             aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
             yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings}})}\n\n"
 
             # Stage 3: Synthesize final answer
             yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            stage3_result, stage3_cost = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            total_cost += stage3_cost
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
 
             # Wait for title generation if it was started
@@ -261,9 +267,12 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 stage2_results,
                 stage3_result
             )
+            
+            # Update conversation cost
+            storage.add_cost_to_conversation(conversation_id, total_cost)
 
-            # Send completion event
-            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            # Send completion event with cost
+            yield f"data: {json.dumps({'type': 'complete', 'cost': total_cost})}\n\n"
 
         except Exception as e:
             # Send error event
