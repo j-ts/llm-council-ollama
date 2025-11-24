@@ -1,30 +1,134 @@
 .sidebar {
   width: 260px;
+<<<<<<< HEAD
   background: #111;
   border-right: 1px solid #333;
+=======
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border-color);
+>>>>>>> pr12-branch
   display: flex;
   flex-direction: column;
   height: 100vh;
 }
 
+/* Sidebar overlay for mobile */
+.sidebar-overlay {
+  display: none;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: -100%;
+    width: 80%;
+    max-width: 300px;
+    height: 100vh;
+    z-index: 1000;
+    border-right: 1px solid var(--border-color);
+    border-bottom: none;
+    transition: left 0.3s ease;
+    box-shadow: 2px 0 8px rgba(0, 0, 0, 0.3);
+  }
+  
+  .sidebar.open {
+    left: 0;
+  }
+  
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 999;
+    animation: fadeIn 0.3s ease;
+  }
+  
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  
+  .conversation-list {
+    max-height: calc(100vh - 140px);
+  }
+}
+
 .sidebar-header {
   padding: 16px;
+<<<<<<< HEAD
   border-bottom: 1px solid #333;
+=======
+  border-bottom: 1px solid var(--border-color);
+>>>>>>> pr12-branch
 }
 
 .sidebar-header h1 {
   font-size: 18px;
   margin: 0 0 12px 0;
+<<<<<<< HEAD
   color: #00ff00;
+=======
+  color: var(--text-primary);
+}
+
+.theme-toggle {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  width: 34px;
+  height: 34px;
+}
+
+.theme-toggle:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.theme-toggle:active {
+  transform: scale(0.95);
+}
+
+.theme-toggle svg {
+  transition: transform 0.3s ease, opacity 0.2s ease;
+}
+
+.theme-toggle:hover svg {
+  transform: rotate(20deg);
+>>>>>>> pr12-branch
 }
 
 .new-conversation-btn {
   width: 100%;
   padding: 10px;
+<<<<<<< HEAD
   background: #00ff00;
   border: 1px solid #00ff00;
   border-radius: 6px;
   color: #000;
+=======
+  background: var(--accent-color);
+  border: 1px solid var(--accent-color);
+  border-radius: 6px;
+  color: var(--button-text);
+>>>>>>> pr12-branch
   cursor: pointer;
   font-size: 14px;
   transition: background 0.2s;
@@ -32,8 +136,13 @@
 }
 
 .new-conversation-btn:hover {
+<<<<<<< HEAD
   background: #00cc00;
   border-color: #00cc00;
+=======
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+>>>>>>> pr12-branch
 }
 
 .conversation-list {
@@ -45,7 +154,11 @@
 .no-conversations {
   padding: 16px;
   text-align: center;
+<<<<<<< HEAD
   color: #777;
+=======
+  color: var(--text-tertiary);
+>>>>>>> pr12-branch
   font-size: 14px;
 }
 
@@ -58,6 +171,7 @@
 }
 
 .conversation-item:hover {
+<<<<<<< HEAD
   background: #222;
 }
 
@@ -68,11 +182,27 @@
 
 .conversation-title {
   color: #00ff00;
+=======
+  background: var(--bg-tertiary);
+}
+
+.conversation-item.active {
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-color);
+}
+
+.conversation-title {
+  color: var(--text-primary);
+>>>>>>> pr12-branch
   font-size: 14px;
   margin-bottom: 4px;
 }
 
 .conversation-meta {
+<<<<<<< HEAD
   color: #777;
+=======
+  color: var(--text-tertiary);
+>>>>>>> pr12-branch
   font-size: 12px;
 }

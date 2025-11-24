@@ -1,17 +1,20 @@
 .stage3 {
-  background: #f0fff0;
-  border-color: #c8e6c8;
+  background: var(--bg-tertiary);
+  border-color: var(--border-color);
 }
 
 .final-response {
-  background: #ffffff;
+  background: var(--bg-primary);
   padding: 20px;
   border-radius: 6px;
-  border: 1px solid #c8e6c8;
+  border: 1px solid var(--border-color);
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .chairman-label {
-  color: #2d8a2d;
+  color: var(--accent-color);
   font-size: 12px;
   font-family: monospace;
   margin-bottom: 12px;
@@ -19,7 +22,25 @@
 }
 
 .final-text {
-  color: #333;
+  color: var(--text-primary);
   line-height: 1.7;
   font-size: 15px;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  .stage3 {
+    margin: 16px 0;
+    padding: 12px;
+  }
+  
+  .final-response {
+    padding: 12px;
+  }
+  
+  .final-text {
+    font-size: 14px;
+  }
 }

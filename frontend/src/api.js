@@ -2,7 +2,7 @@
  * API client for the LLM Council backend.
  */
 
-const API_BASE = 'http://localhost:8002';
+const API_BASE = `http://${window.location.hostname}:8002`;
 
 export const api = {
   /**
@@ -111,5 +111,59 @@ export const api = {
         }
       }
     }
+  },
+
+  /**
+   * Send a message for background processing.
+   * @param {string} conversationId - The conversation ID
+   * @param {string} content - The message content
+   * @returns {Promise<{job_id: string, status: string}>}
+   */
+  async sendMessageAsync(conversationId, content) {
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}/message/async`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ content }),
+      }
+    );
+    if (!response.ok) {
+      throw new Error('Failed to send message');
+    }
+    return response.json();
+  },
+
+  /**
+   * Get job status and result.
+   * @param {string} jobId - The job ID
+   * @returns {Promise<Object>}
+   */
+  async getJobStatus(jobId) {
+    const response = await fetch(`${API_BASE}/api/jobs/${jobId}`);
+    if (!response.ok) {
+      throw new Error('Failed to get job status');
+    }
+    return response.json();
+  },
+
+  /**
+   * Delete a conversation.
+   * @param {string} conversationId - The conversation ID
+   * @returns {Promise<Object>}
+   */
+  async deleteConversation(conversationId) {
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}`,
+      {
+        method: 'DELETE',
+      }
+    );
+    if (!response.ok) {
+      throw new Error('Failed to delete conversation');
+    }
+    return response.json();
   },
 };

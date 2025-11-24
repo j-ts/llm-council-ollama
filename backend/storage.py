@@ -34,7 +34,8 @@ def create_conversation(conversation_id: str) -> Dict[str, Any]:
         "id": conversation_id,
         "created_at": datetime.utcnow().isoformat(),
         "title": "New Conversation",
-        "messages": []
+        "messages": [],
+        "total_cost": 0.0
     }
 
     # Save to file
@@ -98,7 +99,8 @@ def list_conversations() -> List[Dict[str, Any]]:
                     "id": data["id"],
                     "created_at": data["created_at"],
                     "title": data.get("title", "New Conversation"),
-                    "message_count": len(data["messages"])
+                    "message_count": len(data["messages"]),
+                    "total_cost": data.get("total_cost", 0.0)
                 })
 
     # Sort by creation time, newest first
@@ -131,7 +133,8 @@ def add_assistant_message(
     conversation_id: str,
     stage1: List[Dict[str, Any]],
     stage2: List[Dict[str, Any]],
-    stage3: Dict[str, Any]
+    stage3: Dict[str, Any],
+    metadata: Dict[str, Any] = None
 ):
     """
     Add an assistant message with all 3 stages to a conversation.
@@ -141,17 +144,24 @@ def add_assistant_message(
         stage1: List of individual model responses
         stage2: List of model rankings
         stage3: Final synthesized response
+        metadata: Optional metadata (stage_costs, generation_ids, etc.)
     """
     conversation = get_conversation(conversation_id)
     if conversation is None:
         raise ValueError(f"Conversation {conversation_id} not found")
 
-    conversation["messages"].append({
+    assistant_msg = {
         "role": "assistant",
         "stage1": stage1,
         "stage2": stage2,
         "stage3": stage3
-    })
+    }
+    
+    # Add metadata if provided
+    if metadata:
+        assistant_msg["metadata"] = metadata
+    
+    conversation["messages"].append(assistant_msg)
 
     save_conversation(conversation)
 
@@ -169,4 +179,39 @@ def update_conversation_title(conversation_id: str, title: str):
         raise ValueError(f"Conversation {conversation_id} not found")
 
     conversation["title"] = title
+    save_conversation(conversation)
+
+
+def delete_conversation(conversation_id: str):
+    """
+    Delete a conversation.
+
+    Args:
+        conversation_id: Conversation identifier
+    """
+    path = get_conversation_path(conversation_id)
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def add_cost_to_conversation(conversation_id: str, cost: float):
+    """
+    Add cost to a conversation's total.
+
+    Args:
+        conversation_id: Unique identifier for the conversation
+        cost: Cost to add (in USD)
+    """
+    conversation = get_conversation(conversation_id)
+    if conversation is None:
+        return
+
+    # Initialize total_cost if it doesn't exist
+    if "total_cost" not in conversation:
+        conversation["total_cost"] = 0.0
+
+    # Add the cost
+    conversation["total_cost"] += cost
+
+    # Save updated conversation
     save_conversation(conversation)

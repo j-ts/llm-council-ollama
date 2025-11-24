@@ -8,16 +8,24 @@ from typing import List, Dict, Any
 import uuid
 import json
 import asyncio
+from redis import Redis
+from rq import Queue
 
-from . import storage
+from . import storage, jobs
 from .council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings
+from .config import REDIS_URL
+from .worker import process_council_job
 
 app = FastAPI(title="LLM Council API")
 
-# Enable CORS for local development
+# Initialize Redis connection and RQ queue
+redis_conn = Redis.from_url(REDIS_URL)
+task_queue = Queue("council", connection=redis_conn)
+
+# Enable CORS for local and network development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],  # Allow all origins for development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,6 +48,7 @@ class ConversationMetadata(BaseModel):
     created_at: str
     title: str
     message_count: int
+    total_cost: float
 
 
 class Conversation(BaseModel):
@@ -79,6 +88,17 @@ async def get_conversation(conversation_id: str):
     return conversation
 
 
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """Delete a conversation."""
+    conversation = storage.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    storage.delete_conversation(conversation_id)
+    return {"message": "Conversation deleted successfully"}
+
+
 @app.post("/api/conversations/{conversation_id}/message")
 async def send_message(conversation_id: str, request: SendMessageRequest):
     """
@@ -102,7 +122,7 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         storage.update_conversation_title(conversation_id, title)
 
     # Run the 3-stage council process
-    stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
+    stage1_results, stage2_results, stage3_result, metadata, total_cost = await run_full_council(
         request.content
     )
 
@@ -113,14 +133,79 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         stage2_results,
         stage3_result
     )
+    
+    # Update conversation cost
+    storage.add_cost_to_conversation(conversation_id, total_cost)
 
     # Return the complete response with metadata
     return {
         "stage1": stage1_results,
         "stage2": stage2_results,
         "stage3": stage3_result,
-        "metadata": metadata
+        "metadata": metadata,
+        "cost": total_cost
     }
+
+
+@app.post("/api/conversations/{conversation_id}/message/async")
+async def send_message_async(conversation_id: str, request: SendMessageRequest):
+    """
+    Send a message and process it in the background.
+    Returns immediately with a job_id that can be used to check status.
+    """
+    # Check if conversation exists
+    conversation = storage.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Check if this is the first message
+    is_first_message = len(conversation["messages"]) == 0
+
+    # Add user message
+    storage.add_user_message(conversation_id, request.content)
+
+    # Generate job ID
+    job_id = str(uuid.uuid4())
+
+    # Create job record
+    jobs.create_job(job_id, conversation_id, request.content)
+
+    # Enqueue the job for background processing
+    task_queue.enqueue(
+        process_council_job,
+        job_id,
+        conversation_id,
+        request.content,
+        job_timeout='30m'  # 30 minutes timeout
+    )
+
+    # Start title generation in parallel if first message
+    if is_first_message:
+        asyncio.create_task(generate_and_update_title(conversation_id, request.content))
+
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "Job queued for processing"
+    }
+
+
+async def generate_and_update_title(conversation_id: str, user_query: str):
+    """Helper function to generate and update conversation title."""
+    title = await generate_conversation_title(user_query)
+    storage.update_conversation_title(conversation_id, title)
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """
+    Get the status and result of a background job.
+    """
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return job
 
 
 @app.post("/api/conversations/{conversation_id}/message/stream")
@@ -147,20 +232,26 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             if is_first_message:
                 title_task = asyncio.create_task(generate_conversation_title(request.content))
 
+            # Track total cost
+            total_cost = 0.0
+            
             # Stage 1: Collect responses
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-            stage1_results = await stage1_collect_responses(request.content)
+            stage1_results, stage1_cost = await stage1_collect_responses(request.content)
+            total_cost += stage1_cost
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
             # Stage 2: Collect rankings
             yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-            stage2_results, label_to_model = await stage2_collect_rankings(request.content, stage1_results)
+            stage2_results, label_to_model, stage2_cost = await stage2_collect_rankings(request.content, stage1_results)
+            total_cost += stage2_cost
             aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
             yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings}})}\n\n"
 
             # Stage 3: Synthesize final answer
             yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            stage3_result, stage3_cost = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            total_cost += stage3_cost
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
 
             # Wait for title generation if it was started
@@ -176,9 +267,12 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 stage2_results,
                 stage3_result
             )
+            
+            # Update conversation cost
+            storage.add_cost_to_conversation(conversation_id, total_cost)
 
-            # Send completion event
-            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            # Send completion event with cost
+            yield f"data: {json.dumps({'type': 'complete', 'cost': total_cost})}\n\n"
 
         except Exception as e:
             # Send error event

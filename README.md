@@ -2,23 +2,45 @@
 
 ![llmcouncil](header.jpg)
 
+<!-- Table of Contents -->
+- [Vibe Code Alert](#-vibe-code-alert)
+- [New Features (Recent Changes)](#-new-features-recent-changes)
+- [Setup](#-setup)
+- [Running the Application](#-running-the-application)
+- [Tech Stack](#-tech-stack)
+- [License](#-license)
+
 The idea of this repo is that instead of asking a question to your favorite LLM provider (e.g. OpenAI GPT 5.1, Google Gemini 3.0 Pro, Anthropic Claude Sonnet 4.5, xAI Grok 4, eg.c), you can group them into your "LLM Council". This repo is a simple, local web app that essentially looks like ChatGPT except it uses OpenRouter to send your query to multiple LLMs, it then asks them to review and rank each other's work, and finally a Chairman LLM produces the final response.
 
 In a bit more detail, here is what happens when you submit a query:
 
-1. **Stage 1: First opinions**. The user query is given to all LLMs individually, and the responses are collected. The individual responses are shown in a "tab view", so that the user can inspect them all one by one.
-2. **Stage 2: Review**. Each individual LLM is given the responses of the other LLMs. Under the hood, the LLM identities are anonymized so that the LLM can't play favorites when judging their outputs. The LLM is asked to rank them in accuracy and insight.
-3. **Stage 3: Final response**. The designated Chairman of the LLM Council takes all of the model's responses and compiles them into a single final answer that is presented to the user.
+1. **Stage 1: First opinions** – The user query is sent to all LLMs individually and the responses are collected. Each response is shown in a tab view for easy inspection.
+2. **Stage 2: Review** – Every LLM receives the other models' responses (identities are anonymised) and is asked to rank them on accuracy and insight.
+3. **Stage 3: Final response** – The designated Chairman model aggregates the ranked outputs into a single, polished answer for the user.
 
-## Vibe Code Alert
+---
 
-This project was 99% vibe coded as a fun Saturday hack because I wanted to explore and evaluate a number of LLMs side by side in the process of [reading books together with LLMs](https://x.com/karpathy/status/1990577951671509438). It's nice and useful to see multiple responses side by side, and also the cross-opinions of all LLMs on each other's outputs. I'm not going to support it in any way, it's provided here as is for other people's inspiration and I don't intend to improve it. Code is ephemeral now and libraries are over, ask your LLM to change it in whatever way you like.
+## ✨ Vibe Code Alert
 
-## Setup
+This project was 99% *vibe‑coded* as a fun Saturday hack while exploring side‑by‑side LLM comparisons (see the original tweet [here](https://x.com/karpathy/status/1990577951671509438)). The code is intentionally lightweight and may contain shortcuts. **It is provided as‑is for inspiration; no ongoing support is guaranteed.**
+
+---
+
+## 🎨 New Features (Recent Changes)
+
+- **Dark Theme** – A sleek dark UI is now the default. See the demo below.
+- **Free OpenRouter Models** – The default configuration now uses free‑tier OpenRouter models, lowering the barrier to try the app out of the box.
+- **Docker Setup** – A minimal Dockerfile and compose script have been added for quick containerised deployment.
+
+![dark theme screenshot](dark_theme.png)
+
+---
+
+## 🚀 Setup
 
 ### 1. Install Dependencies
 
-The project uses [uv](https://docs.astral.sh/uv/) for project management.
+The project uses [uv](https://docs.astral.sh/uv/) for Python dependency management.
 
 **Backend:**
 ```bash
@@ -33,31 +55,35 @@ cd ..
 ```
 
 ### 2. Configure API Key
-
 Create a `.env` file in the project root:
-
 ```bash
 OPENROUTER_API_KEY=sk-or-v1-...
 ```
+Get your API key at [openrouter.ai](https://openrouter.ai/).
 
-Get your API key at [openrouter.ai](https://openrouter.ai/). Make sure to purchase the credits you need, or sign up for automatic top up.
-
-### 3. Configure Models (Optional)
-
-Edit `backend/config.py` to customize the council:
-
+### 3. (Optional) Configure Models
+Edit `backend/config.py` to customise the council. The default now points to free OpenRouter models:
 ```python
 COUNCIL_MODELS = [
-    "openai/gpt-5.1",
-    "google/gemini-3-pro-preview",
-    "anthropic/claude-sonnet-4.5",
-    "x-ai/grok-4",
+    "openrouter/anthropic/claude-2.1",
+    "openrouter/google/gemini-pro",
+    "openrouter/meta/llama-3.1-8b",
+    "openrouter/mistralai/mistral-7b",
 ]
 
-CHAIRMAN_MODEL = "google/gemini-3-pro-preview"
+CHAIRMAN_MODEL = "openrouter/google/gemini-pro"
 ```
 
-## Running the Application
+### 4. (Optional) Docker Deployment
+A simple Dockerfile is provided. To build and run:
+```bash
+docker build -t llm-council .
+docker run -p 5173:5173 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY llm-council
+```
+
+---
+
+## ▶️ Running the Application
 
 **Option 1: Use the start script**
 ```bash
@@ -66,22 +92,34 @@ CHAIRMAN_MODEL = "google/gemini-3-pro-preview"
 
 **Option 2: Run manually**
 
-Terminal 1 (Backend):
+Backend:
 ```bash
 uv run python -m backend.main
 ```
-
-Terminal 2 (Frontend):
+Frontend:
 ```bash
 cd frontend
 npm run dev
 ```
-
 Then open http://localhost:5173 in your browser.
 
-## Tech Stack
+---
 
-- **Backend:** FastAPI (Python 3.10+), async httpx, OpenRouter API
-- **Frontend:** React + Vite, react-markdown for rendering
+## 🛠️ Tech Stack
+
+- **Backend:** FastAPI (Python 3.10+), async httpx, OpenRouter API
+- **Frontend:** React + Vite, react‑markdown for rendering
 - **Storage:** JSON files in `data/conversations/`
 - **Package Management:** uv for Python, npm for JavaScript
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Feel free to open issues or submit pull requests. Please ensure that any new code follows the existing style and includes appropriate documentation.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License. See `LICENSE` for details.

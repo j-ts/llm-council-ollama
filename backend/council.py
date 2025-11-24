@@ -20,16 +20,37 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
     # Query all models in parallel
     responses = await query_models_parallel(COUNCIL_MODELS, messages)
 
-    # Format results
+    # Format results and collect costs + generation IDs
     stage1_results = []
+    total_cost = 0.0
+    generation_ids = {}  # Track generation IDs for cost polling
+    
     for model, response in responses.items():
         if response is not None:  # Only include successful responses
+            # Extract cost and generation ID
+            model_cost = 0.0
+            cost_status = 'estimated'
+            gen_id = None
+            
+            if 'usage' in response:
+                usage = response['usage']
+                model_cost = usage.get('cost', 0.0)
+                cost_status = usage.get('cost_status', 'estimated')
+                gen_id = usage.get('generation_id')
+                total_cost += model_cost
+                
+                # Store generation ID for later polling
+                if gen_id:
+                    generation_ids[f"stage1_{model}"] = gen_id
+            
             stage1_results.append({
                 "model": model,
-                "response": response.get('content', '')
+                "response": response.get('content', ''),
+                "cost": model_cost,
+                "cost_status": cost_status
             })
 
-    return stage1_results
+    return stage1_results, total_cost, generation_ids
 
 
 async def stage2_collect_rankings(
@@ -97,19 +118,40 @@ Now provide your evaluation and ranking:"""
     # Get rankings from all council models in parallel
     responses = await query_models_parallel(COUNCIL_MODELS, messages)
 
-    # Format results
+    # Format results and collect costs + generation IDs
     stage2_results = []
+    total_cost = 0.0
+    generation_ids = {}
+    
     for model, response in responses.items():
         if response is not None:
             full_text = response.get('content', '')
             parsed = parse_ranking_from_text(full_text)
+            
+            # Extract cost and generation ID
+            model_cost = 0.0
+            cost_status = 'estimated'
+            gen_id = None
+            
+            if 'usage' in response:
+                usage = response['usage']
+                model_cost = usage.get('cost', 0.0)
+                cost_status = usage.get('cost_status', 'estimated')
+                gen_id = usage.get('generation_id')
+                total_cost += model_cost
+                
+                if gen_id:
+                    generation_ids[f"stage2_{model}"] = gen_id
+            
             stage2_results.append({
                 "model": model,
                 "ranking": full_text,
-                "parsed_ranking": parsed
+                "parsed_ranking": parsed,
+                "cost": model_cost,
+                "cost_status": cost_status
             })
 
-    return stage2_results, label_to_model
+    return stage2_results, label_to_model, total_cost, generation_ids
 
 
 async def stage3_synthesize_final(
@@ -166,12 +208,29 @@ Provide a clear, well-reasoned final answer that represents the council's collec
         return {
             "model": CHAIRMAN_MODEL,
             "response": "Error: Unable to generate final synthesis."
-        }
+        }, 0.0
+
+    # Extract cost and generation ID
+    cost = 0.0
+    cost_status = 'estimated'
+    gen_id = None
+    
+    if response and 'usage' in response:
+        usage = response['usage']
+        cost = usage.get('cost', 0.0)
+        cost_status = usage.get('cost_status', 'estimated')
+        gen_id = usage.get('generation_id')
+    
+    generation_ids = {}
+    if gen_id:
+        generation_ids[f"stage3_{CHAIRMAN_MODEL}"] = gen_id
 
     return {
         "model": CHAIRMAN_MODEL,
-        "response": response.get('content', '')
-    }
+        "response": response.get('content', ''),
+        "cost": cost,
+        "cost_status": cost_status
+    }, cost, generation_ids
 
 
 def parse_ranking_from_text(ranking_text: str) -> List[str]:
@@ -275,6 +334,8 @@ Title:"""
     messages = [{"role": "user", "content": title_prompt}]
 
     # Use gemini-2.5-flash for title generation (fast and cheap)
+    # Note: Title generation cost is NOT included in conversation total cost
+    # Cost is negligible (~$0.0001 per title) so we don't track it
     response = await query_model("google/gemini-2.5-flash", messages, timeout=30.0)
 
     if response is None:
@@ -293,7 +354,7 @@ Title:"""
     return title
 
 
-async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
+async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict, float]:
     """
     Run the complete 3-stage council process.
 
@@ -301,35 +362,52 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
         user_query: The user's question
 
     Returns:
-        Tuple of (stage1_results, stage2_results, stage3_result, metadata)
+        Tuple of (stage1_results, stage2_results, stage3_result, metadata, total_cost)
     """
+    total_cost = 0.0
+    
     # Stage 1: Collect individual responses
-    stage1_results = await stage1_collect_responses(user_query)
+    stage1_results, stage1_cost, stage1_gen_ids = await stage1_collect_responses(user_query)
+    total_cost += stage1_cost
 
     # If no models responded successfully, return error
     if not stage1_results:
         return [], [], {
             "model": "error",
             "response": "All models failed to respond. Please try again."
-        }, {}
+        }, {}, 0.0
 
     # Stage 2: Collect rankings
-    stage2_results, label_to_model = await stage2_collect_rankings(user_query, stage1_results)
+    stage2_results, label_to_model, stage2_cost, stage2_gen_ids = await stage2_collect_rankings(user_query, stage1_results)
+    total_cost += stage2_cost
 
     # Calculate aggregate rankings
     aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
 
     # Stage 3: Synthesize final answer
-    stage3_result = await stage3_synthesize_final(
+    stage3_result, stage3_cost, stage3_gen_ids = await stage3_synthesize_final(
         user_query,
         stage1_results,
         stage2_results
     )
 
-    # Prepare metadata
+    total_cost += stage3_cost
+    
+    # Merge all generation IDs
+    all_generation_ids = {**stage1_gen_ids, **stage2_gen_ids, **stage3_gen_ids}
+    
+    # Prepare metadata with stage costs and generation IDs
     metadata = {
         "label_to_model": label_to_model,
-        "aggregate_rankings": aggregate_rankings
+        "aggregate_rankings": aggregate_rankings,
+        "stage_costs": {
+            "stage1": stage1_cost,
+            "stage2": stage2_cost,
+            "stage3": stage3_cost,
+            "total": total_cost,
+            "status": "estimated"
+        },
+        "generation_ids": all_generation_ids
     }
 
-    return stage1_results, stage2_results, stage3_result, metadata
+    return stage1_results, stage2_results, stage3_result, metadata, total_cost

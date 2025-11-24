@@ -29,6 +29,7 @@ async def query_model(
     payload = {
         "model": model,
         "messages": messages,
+        "include_usage": True  # Enable usage accounting to get cost data
     }
 
     try:
@@ -42,10 +43,33 @@ async def query_model(
 
             data = response.json()
             message = data['choices'][0]['message']
+            
+            # Extract usage and cost information from OpenRouter API
+            usage = data.get('usage', {})
+            prompt_tokens = usage.get('prompt_tokens', 0)
+            completion_tokens = usage.get('completion_tokens', 0)
+            
+            # Calculate ESTIMATED cost from tokens (immediate)
+            # Actual cost will be fetched later from generation API
+            from .config import calculate_estimated_cost
+            estimated_cost = calculate_estimated_cost(model, prompt_tokens, completion_tokens)
+            
+            # Extract generation ID for later cost polling
+            generation_id = data.get('id', None)
+            
+            cost_info = {
+                'prompt_tokens': prompt_tokens,
+                'completion_tokens': completion_tokens,
+                'total_tokens': usage.get('total_tokens', 0),
+                'cost': estimated_cost,  # Estimated cost (immediate)
+                'cost_status': 'estimated',  # Mark as estimate
+                'generation_id': generation_id  # For polling actual cost later
+            }
 
             return {
                 'content': message.get('content'),
-                'reasoning_details': message.get('reasoning_details')
+                'reasoning_details': message.get('reasoning_details'),
+                'usage': cost_info
             }
 
     except Exception as e:
@@ -77,3 +101,43 @@ async def query_models_parallel(
 
     # Map models to their responses
     return {model: response for model, response in zip(models, responses)}
+
+
+async def fetch_actual_cost(generation_id: str) -> float:
+    """
+    Fetch actual cost from OpenRouter generation API.
+    This polls the /generation endpoint to get the real cost after calculation.
+    
+    Args:
+        generation_id: The generation ID from the chat completion response
+    
+    Returns:
+        Actual cost in USD, or 0.0 if not available
+    """
+    if not generation_id:
+        return 0.0
+    
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"https://openrouter.ai/api/v1/generation?id={generation_id}",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Extract actual cost from generation data
+                generation_data = data.get('data', {})
+                actual_cost = generation_data.get('total_cost', 0.0)
+                return float(actual_cost) if actual_cost else 0.0
+            else:
+                return 0.0
+                
+    except Exception as e:
+        print(f"Error fetching actual cost for {generation_id}: {e}")
+        return 0.0
