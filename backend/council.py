@@ -220,6 +220,8 @@ IMPORTANT: Your final ranking MUST be formatted EXACTLY as follows:
 - Each line should be: number, period, space, then ONLY the response label (e.g., "1. Response A")
 - Do not add any other text or explanations in the ranking section
 
+Do not preface with acknowledgments or chit-chat. Start immediately with the evaluations, then the FINAL RANKING block exactly as specified.
+
 Example of the correct format for your ENTIRE response:
 
 Response A provides good detail on X but misses Y...
@@ -256,6 +258,9 @@ Now provide your evaluation and ranking:"""
         if response is not None:
             full_text = response.get('content', '')
             parsed = parse_ranking_from_text(full_text)
+            parsed_error = None
+            if not parsed:
+                parsed_error = "Ranking not found in model output"
             
             # Extract cost and generation ID
             model_cost = 0.0
@@ -282,7 +287,7 @@ Now provide your evaluation and ranking:"""
                 "parsed_ranking": parsed,
                 "cost": model_cost,
                 "cost_status": cost_status,
-                "error": None
+                "error": parsed_error
             })
         else:
             stage2_results.append({
@@ -329,22 +334,23 @@ async def stage3_synthesize_final(
         if not result.get("error")
     ])
 
-    chairman_prompt = f"""You are the Chairman of an LLM Council. Multiple AI models have provided responses to a user's question, and then ranked each other's responses.
+    chairman_prompt = f"""You are the Chairman of an LLM Council. Your job is to deliver the final response to the user.
 
 Original Question: {user_query}
 
-STAGE 1 - Individual Responses:
+STAGE 1 - Individual Responses (treat these as raw ideas, do NOT cite "Response A/B/etc."):
 {stage1_text}
 
-STAGE 2 - Peer Rankings:
+STAGE 2 - Peer Rankings (use these only to gauge confidence/quality, not as content to parrot):
 {stage2_text}
 
-Your task as Chairman is to synthesize all of this information into a single, comprehensive, accurate answer to the user's original question. Consider:
-- The individual responses and their insights
-- The peer rankings and what they reveal about response quality
-- Any patterns of agreement or disagreement
+Your response must:
+1. Directly answer the user's original question in plain language. Never refer to "Response A/B/C" or similar labels.
+2. Integrate the strongest points from the Stage 1 answers, resolving disagreements if they exist. Explain the reasoning so the user understands the conclusion without seeing the earlier responses.
+3. Explicitly mention supporting evidence or caveats the council surfaced, but use natural prose (e.g., "Some models noted...", "One perspective emphasized...").
+4. Conclude with a concise takeaway or recommendation when appropriate.
 
-Provide a clear, well-reasoned final answer that represents the council's collective wisdom:"""
+Provide a single, comprehensive, accurate answer that stands on its own for the user:"""
 
     messages = [{"role": "user", "content": chairman_prompt}]
 
