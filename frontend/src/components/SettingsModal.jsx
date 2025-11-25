@@ -55,6 +55,13 @@ function SettingsModal({ isOpen, onClose }) {
                 data.providers.openai = [];
             }
 
+            // Default safer context length for Ollama if missing
+            if (!data.providers.ollama) {
+                data.providers.ollama = { base_url: 'http://localhost:11434', num_ctx: 4096 };
+            } else if (typeof data.providers.ollama.num_ctx !== 'number') {
+                data.providers.ollama.num_ctx = 4096;
+            }
+
             if (typeof data.serialize_local_models !== 'boolean') {
                 data.serialize_local_models = false;
             }
@@ -364,6 +371,18 @@ function SettingsModal({ isOpen, onClose }) {
                                             <small>
                                                 Ensure Ollama is running. <a href="https://ollama.com/library" target="_blank" rel="noopener noreferrer">Browse models</a>
                                             </small>
+                                        </div>
+                                        <div className="form-group">
+                                            <label>Max context tokens (applied to this app only)</label>
+                                            <input
+                                                type="number"
+                                                min="512"
+                                                step="512"
+                                                value={config.providers.ollama?.num_ctx ?? 4096}
+                                                onChange={(e) => updateProviderConfig('ollama', 'num_ctx', Number(e.target.value))}
+                                                placeholder="e.g., 4096"
+                                            />
+                                            <small>Lower values reduce VRAM usage and prevent load failures.</small>
                                         </div>
                                         <div className="form-group checkbox-row">
                                             <label className="checkbox-label">

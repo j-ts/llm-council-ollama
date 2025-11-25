@@ -74,6 +74,14 @@ class ConfigManager:
         """Add default keys that may be missing from older config files."""
         if "serialize_local_models" not in config:
             config["serialize_local_models"] = False
+        # Ensure Ollama provider exists and has num_ctx default
+        providers = config.get("providers", {})
+        ollama_cfg = providers.get("ollama", {})
+        if "num_ctx" not in ollama_cfg:
+            # Default to a safer context to avoid excessive VRAM usage on local GPUs
+            ollama_cfg["num_ctx"] = 4096
+        providers["ollama"] = ollama_cfg
+        config["providers"] = providers
         return config
 
     def _migrate_old_config(self, old_config: Dict[str, Any]) -> Dict[str, Any]:

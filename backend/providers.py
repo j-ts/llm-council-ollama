@@ -46,8 +46,10 @@ class OpenRouterProvider(ModelProvider):
 class OllamaProvider(ModelProvider):
     """Provider for local Ollama instance."""
 
-    def __init__(self, base_url: str = "http://localhost:11434"):
+    def __init__(self, base_url: str = "http://localhost:11434", options: Optional[Dict[str, Any]] = None):
         self.base_url = base_url.rstrip("/")
+        # Optional per-request options (e.g., num_ctx) to avoid overallocating KV cache
+        self.options = options or {}
 
     async def query(self, model: str, messages: List[Dict[str, str]], timeout: float = 120.0) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}/api/chat"
@@ -56,6 +58,8 @@ class OllamaProvider(ModelProvider):
             "messages": messages,
             "stream": False
         }
+        if self.options:
+            payload["options"] = {k: v for k, v in self.options.items() if v is not None}
         
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -256,7 +260,10 @@ class ProviderFactory:
         
         # Create new provider instance
         if provider_name == "ollama":
-            provider = OllamaProvider(base_url=provider_config.get("base_url", "http://localhost:11434"))
+            provider = OllamaProvider(
+                base_url=provider_config.get("base_url", "http://localhost:11434"),
+                options={"num_ctx": provider_config.get("num_ctx")}
+            )
         elif provider_name == "openrouter":
             provider = OpenRouterProvider(api_key=provider_config.get("api_key", ""))
         else:
@@ -282,7 +289,8 @@ class ProviderFactory:
         # Ollama
         if "ollama" in providers_config:
             providers["ollama"] = OllamaProvider(
-                base_url=providers_config["ollama"].get("base_url", "http://localhost:11434")
+                base_url=providers_config["ollama"].get("base_url", "http://localhost:11434"),
+                options={"num_ctx": providers_config["ollama"].get("num_ctx")}
             )
         
         # OpenRouter
