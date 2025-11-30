@@ -343,6 +343,31 @@ class OpenAIProvider(ModelProvider):
 
 class ProviderFactory:
     _provider_cache: Dict[str, ModelProvider] = {}
+
+    @staticmethod
+    def _resolve_api_key(raw_api_key: Any, model_label: str) -> str:
+        """
+        Resolve API keys that reference environment variables.
+
+        Supports values like "env:VAR_NAME" and raises a clear error if the
+        variable is missing.
+        """
+        if raw_api_key is None:
+            return ""
+        if not isinstance(raw_api_key, str):
+            return ""
+        api_key = raw_api_key.strip()
+        if not api_key:
+            return ""
+        if api_key.startswith("env:"):
+            env_var_name = api_key[4:].strip()
+            if not env_var_name:
+                raise ValueError(f"Environment variable name missing for model {model_label}")
+            resolved = os.getenv(env_var_name, "")
+            if not resolved:
+                raise ValueError(f"Environment variable {env_var_name} not set for model {model_label}")
+            return resolved
+        return api_key
     
     @staticmethod
     def get_provider_from_model_config(model_config: Dict[str, Any], ollama_settings: Dict[str, Any] = None) -> ModelProvider:
@@ -357,16 +382,19 @@ class ProviderFactory:
             Configured ModelProvider instance
         """
         model_type = model_config.get("type", "ollama")
-        api_key = model_config.get("api_key", "")
+        raw_api_key = model_config.get("api_key", "")
+        model_label = model_config.get("label") or model_config.get("model_name") or model_type
         base_url = model_config.get("base_url", "")
 
         if model_type == "ollama":
             base_url = _rewrite_localhost_base_url(base_url or "http://localhost:11434")
         elif model_type == "openai-compatible":
             base_url = _normalize_openai_base_url(base_url or "https://api.openai.com/v1")
+
+        resolved_api_key = ProviderFactory._resolve_api_key(raw_api_key, model_label)
         
         # Create cache key based on model config
-        cache_key = f"{model_type}::{base_url}::{api_key[:10] if api_key else ''}"
+        cache_key = f"{model_type}::{base_url}::{resolved_api_key[:10] if resolved_api_key else ''}"
         
         if cache_key in ProviderFactory._provider_cache:
             return ProviderFactory._provider_cache[cache_key]
@@ -381,9 +409,9 @@ class ProviderFactory:
                 options={"num_ctx": num_ctx} if num_ctx else None
             )
         elif model_type == "openrouter":
-            provider = OpenRouterProvider(api_key=api_key)
+            provider = OpenRouterProvider(api_key=resolved_api_key)
         elif model_type == "openai-compatible":
-            provider = OpenAIProvider(api_key=api_key, base_url=base_url)
+            provider = OpenAIProvider(api_key=resolved_api_key, base_url=base_url)
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
@@ -430,22 +458,35 @@ class ProviderFactory:
                 # Fallback if no config exists at all
                 selected_config = {"base_url": "https://api.openai.com/v1", "api_key": ""}
             
-            cache_key = f"openai:{selected_config.get('name', 'default')}:{selected_config.get('base_url')}"
+            resolved_api_key = ProviderFactory._resolve_api_key(
+                selected_config.get("api_key", ""),
+                selected_config.get("name", "OpenAI")
+            )
+            cache_key = f"openai:{selected_config.get('name', 'default')}:{selected_config.get('base_url')}:{resolved_api_key[:10] if resolved_api_key else ''}"
             
             if cache_key in ProviderFactory._provider_cache:
                 return ProviderFactory._provider_cache[cache_key]
             
             provider = OpenAIProvider(
-                api_key=selected_config.get("api_key", ""),
+                api_key=resolved_api_key,
                 base_url=_normalize_openai_base_url(selected_config.get("base_url", "https://api.openai.com/v1"))
             )
             ProviderFactory._provider_cache[cache_key] = provider
             return provider
 
         # Standard handling for other providers
-        provider_config = providers_config.get(provider_name, {})
+        provider_config = providers_config.get(provider_name, {}) if isinstance(providers_config, dict) else {}
+        resolved_api_key = ""
+        if provider_name == "openrouter":
+            resolved_api_key = ProviderFactory._resolve_api_key(provider_config.get("api_key", ""), provider_name)
+
         # Cache providers by base configuration; per-model options are applied at query-time.
-        cache_key = f"{provider_name}:{json.dumps(provider_config, sort_keys=True)}"
+        if provider_name == "ollama":
+            cache_key = f"{provider_name}:{provider_config.get('base_url')}:{provider_config.get('num_ctx')}"
+        elif provider_name == "openrouter":
+            cache_key = f"{provider_name}:{resolved_api_key[:10] if resolved_api_key else ''}"
+        else:
+            cache_key = f"{provider_name}:{json.dumps(provider_config, sort_keys=True)}"
         
         # Return cached provider if available
         if cache_key in ProviderFactory._provider_cache:
@@ -458,7 +499,7 @@ class ProviderFactory:
                 options={"num_ctx": provider_config.get("num_ctx")}
             )
         elif provider_name == "openrouter":
-            provider = OpenRouterProvider(api_key=provider_config.get("api_key", ""))
+            provider = OpenRouterProvider(api_key=resolved_api_key)
         else:
             raise ValueError(f"Unknown provider: {provider_name}")
         
@@ -488,8 +529,9 @@ class ProviderFactory:
         
         # OpenRouter
         if "openrouter" in providers_config and providers_config["openrouter"].get("api_key"):
+            api_key_value = ProviderFactory._resolve_api_key(providers_config["openrouter"].get("api_key"), "openrouter")
             providers["openrouter"] = OpenRouterProvider(
-                api_key=providers_config["openrouter"]["api_key"]
+                api_key=api_key_value
             )
         
         # OpenAI (Multiple instances)
@@ -500,12 +542,13 @@ class ProviderFactory:
                 
             for config in openai_configs:
                 if config.get("api_key"):
+                    resolved_api_key = ProviderFactory._resolve_api_key(config.get("api_key"), config.get("name", "OpenAI"))
                     name = config.get("name", "Default")
                     # Use a composite key for the frontend to identify specific OpenAI instances
                     # Format: openai:{name}
                     key = f"openai:{name}"
                     providers[key] = OpenAIProvider(
-                        api_key=config["api_key"],
+                        api_key=resolved_api_key,
                         base_url=_normalize_openai_base_url(config.get("base_url", "https://api.openai.com/v1"))
                     )
         

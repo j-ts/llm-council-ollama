@@ -2,670 +2,404 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../api';
 import './SettingsModal.css';
 
-const PROVIDERS = [
-    { id: 'ollama', name: 'Ollama (Local)' },
-    { id: 'openrouter', name: 'OpenRouter (Cloud)' },
-    { id: 'openai', name: 'OpenAI Compatible' },
-];
-
-// Common OpenRouter models for quick reference
-const POPULAR_OPENROUTER_MODELS = [
-    'anthropic/claude-3.5-sonnet',
-    'openai/gpt-4-turbo',
-    'google/gemini-pro-1.5',
-    'meta-llama/llama-3.1-70b-instruct',
-    'mistralai/mistral-large',
-    'deepseek/deepseek-chat',
-];
-
 function SettingsModal({ isOpen, onClose }) {
     const [config, setConfig] = useState(null);
+    const [models, setModels] = useState({});
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
-    const [status, setStatus] = useState({ type: '', message: '' });
-    const [availableModels, setAvailableModels] = useState({
-        ollama: [],
-        openrouter: [],
-        openai: []
+    const [activeTab, setActiveTab] = useState('models'); // 'models', 'other', 'council'
+
+    // Model editor state
+    const [showModelEditor, setShowModelEditor] = useState(false);
+    const [editingModel, setEditingModel] = useState(null); // null = new, otherwise model_id
+    const [modelForm, setModelForm] = useState({
+        label: '',
+        type: 'ollama',
+        model_name: '',
+        base_url: 'http://localhost:11434',
+        api_key: ''
     });
-    const [loadingModels, setLoadingModels] = useState(false);
-    const [expandedProviders, setExpandedProviders] = useState({
-        ollama: true,
-        openrouter: true,
-        openai: false
-    });
+    const [apiKeyMode, setApiKeyMode] = useState('direct'); // 'direct' | 'env'
+    const [envVarName, setEnvVarName] = useState('');
+    const [draftModelId, setDraftModelId] = useState(null);
+
+    const generalSettings = config?.general_settings || { use_env_for_api_keys: false };
+
+    const generateEnvVarName = (idHint) => {
+        const safeId = (idHint || 'model').toString().replace(/[^A-Za-z0-9]/g, '_').toUpperCase();
+        return `MODEL_${safeId}_API_KEY`;
+    };
 
     useEffect(() => {
         if (isOpen) {
             loadConfig();
-            setStatus({ type: '', message: '' });
         }
     }, [isOpen]);
 
     const loadConfig = async () => {
+        setLoading(true);
         try {
-            setLoading(true);
             const data = await api.getConfig();
-
-            // Ensure openai is an array (handle legacy/migration edge cases in frontend state)
-            if (data.providers.openai && !Array.isArray(data.providers.openai)) {
-                data.providers.openai = [data.providers.openai];
-            }
-            if (!data.providers.openai) {
-                data.providers.openai = [];
-            }
-
-            // Default safer context length for Ollama if missing
-            if (!data.providers.ollama) {
-                data.providers.ollama = { base_url: 'http://localhost:11434', num_ctx: 4096 };
-            } else if (typeof data.providers.ollama.num_ctx !== 'number') {
-                data.providers.ollama.num_ctx = 4096;
-            }
-
-            if (typeof data.serialize_local_models !== 'boolean') {
-                data.serialize_local_models = false;
-            }
-
-            setConfig(data);
-            loadAllModels();
-        } catch (error) {
-            console.error('Failed to load config:', error);
-            setStatus({ type: 'error', message: 'Failed to load configuration. Using defaults.' });
-            setConfig({
-                providers: {
-                    ollama: { base_url: 'http://localhost:11434' },
-                    openrouter: { api_key: '' },
-                    openai: [{ name: 'Default', base_url: 'https://api.openai.com/v1', api_key: '' }]
-                },
-                serialize_local_models: false,
-                council_models: [],
-                chairman_model: { name: '', provider: 'ollama' }
-            });
+            const incomingGeneral = data.general_settings || { use_env_for_api_keys: false };
+            setConfig({ ...data, general_settings: incomingGeneral });
+            setModels(data.models || {});
+        } catch (err) {
+            console.error('Failed to load config:', err);
         } finally {
             setLoading(false);
         }
     };
 
-    const loadAllModels = async () => {
-        try {
-            setLoadingModels(true);
-            const data = await api.listAllModels();
-            setAvailableModels(data.models || {});
-        } catch (error) {
-            console.error('Failed to load models:', error);
-            setAvailableModels({ ollama: [], openrouter: [], openai: [] });
-        } finally {
-            setLoadingModels(false);
-        }
-    };
-
-    const toggleProvider = (provider) => {
-        setExpandedProviders({
-            ...expandedProviders,
-            [provider]: !expandedProviders[provider]
-        });
-    };
-
-    const validateConfig = () => {
-        if (!config) return false;
-
-        // Check if required provider credentials are present for selected models
-        const usedProviders = new Set();
-        const usedOpenAIConfigs = new Set();
-
-        // Collect providers from council models
-        config.council_models.forEach(model => {
-            if (model.provider) usedProviders.add(model.provider);
-            if (model.provider === 'openai' && model.openai_config_name) {
-                usedOpenAIConfigs.add(model.openai_config_name);
-            }
-        });
-
-        // Add chairman model provider
-        if (config.chairman_model && config.chairman_model.provider) {
-            usedProviders.add(config.chairman_model.provider);
-            if (config.chairman_model.provider === 'openai' && config.chairman_model.openai_config_name) {
-                usedOpenAIConfigs.add(config.chairman_model.openai_config_name);
-            }
-        }
-
-        // Validate each used provider has required credentials
-        if (usedProviders.has('openrouter') && !config.providers.openrouter?.api_key) {
-            setStatus({ type: 'error', message: 'OpenRouter API Key is required for selected models.' });
-            return false;
-        }
-        if (usedProviders.has('ollama') && !config.providers.ollama?.base_url) {
-            setStatus({ type: 'error', message: 'Ollama Base URL is required for selected models.' });
-            return false;
-        }
-
-        if (usedProviders.has('openai')) {
-            const openaiConfigs = config.providers.openai || [];
-            if (openaiConfigs.length === 0) {
-                setStatus({ type: 'error', message: 'At least one OpenAI configuration is required.' });
-                return false;
-            }
-
-            // Names must be unique so configs can be targeted reliably
-            const openaiNameSet = new Set();
-
-            // Check if used configs exist and are valid
-            for (const configName of usedOpenAIConfigs) {
-                const conf = openaiConfigs.find(c => c.name === configName);
-                if (!conf) {
-                    setStatus({ type: 'error', message: `OpenAI config "${configName}" is used but not defined.` });
-                    return false;
-                }
-                if (!conf.base_url) {
-                    setStatus({ type: 'error', message: `Base URL is required for OpenAI config "${configName}".` });
-                    return false;
-                }
-                if (!conf.api_key) {
-                    setStatus({ type: 'error', message: `API Key is required for OpenAI config "${configName}".` });
-                    return false;
-                }
-            }
-
-            // If no specific config is used but 'openai' provider is selected (e.g. default), check the first one or all?
-            // Let's just check that all defined configs have at least a name and base_url
-            for (const conf of openaiConfigs) {
-                if (!conf.name) {
-                    setStatus({ type: 'error', message: 'All OpenAI configurations must have a name.' });
-                    return false;
-                }
-                const normalizedName = conf.name.trim().toLowerCase();
-                if (openaiNameSet.has(normalizedName)) {
-                    setStatus({ type: 'error', message: 'OpenAI configuration names must be unique.' });
-                    return false;
-                }
-                openaiNameSet.add(normalizedName);
-            }
-        }
-
-        // Validate model names
-        if (config.council_models.some(m => !m.name?.trim())) {
-            setStatus({ type: 'error', message: 'All Council Models must have a name.' });
-            return false;
-        }
-
-        if (!config.chairman_model?.name) {
-            setStatus({ type: 'error', message: 'Chairman Model is required.' });
-            return false;
-        }
-
-        return true;
-    };
-
     const handleSave = async () => {
-        setStatus({ type: '', message: '' });
-
-        if (!validateConfig()) {
-            return;
-        }
-
+        setSaving(true);
         try {
-            setSaving(true);
-            await api.updateConfig(config);
-            setStatus({ type: 'success', message: 'Settings saved successfully!' });
-            setTimeout(() => {
-                onClose();
-            }, 1000);
-        } catch (error) {
-            console.error('Failed to save config:', error);
-            setStatus({ type: 'error', message: 'Failed to save settings.' });
+            const updated = { ...config, models, general_settings: generalSettings };
+            await api.updateConfig(updated);
+            onClose();
+        } catch (err) {
+            console.error('Failed to save config:', err);
+            alert('Failed to save settings');
         } finally {
             setSaving(false);
         }
     };
 
-    const handleCouncilModelChange = (index, field, value) => {
-        const newModels = [...config.council_models];
-        newModels[index] = { ...newModels[index], [field]: value };
+    const openModelEditor = (modelId = null) => {
+        const targetId = modelId || `model_${Date.now()}`;
+        const model = modelId ? models[modelId] : null;
+        const apiKeyValue = model?.api_key || '';
+        const isEnvReference = typeof apiKeyValue === 'string' && apiKeyValue.startsWith('env:');
+        const inferredEnvName = isEnvReference ? apiKeyValue.slice(4).trim() : generateEnvVarName(targetId);
+        const shouldUseEnvMode = isEnvReference || (!model && generalSettings.use_env_for_api_keys);
 
-        // If provider changed to openai, set default config name if not present
-        if (field === 'provider' && value === 'openai' && !newModels[index].openai_config_name) {
-            if (config.providers.openai && config.providers.openai.length > 0) {
-                newModels[index].openai_config_name = config.providers.openai[0].name;
+        setDraftModelId(targetId);
+        setEditingModel(modelId);
+        setApiKeyMode(shouldUseEnvMode ? 'env' : 'direct');
+        setEnvVarName(inferredEnvName || generateEnvVarName(targetId));
+
+        setModelForm({
+            label: model?.label || '',
+            type: model?.type || 'ollama',
+            model_name: model?.model_name || '',
+            base_url: model?.base_url || 'http://localhost:11434',
+            api_key: isEnvReference ? '' : (apiKeyValue || '')
+        });
+        setShowModelEditor(true);
+    };
+
+    const closeModelEditor = () => {
+        setShowModelEditor(false);
+        setEditingModel(null);
+        setApiKeyMode('direct');
+        setEnvVarName('');
+        setDraftModelId(null);
+    };
+
+    const saveModel = async () => {
+        const modelId = editingModel || draftModelId || `model_${Date.now()}`;
+        const requiresApiKey = modelForm.type === 'openrouter' || modelForm.type === 'openai-compatible';
+        const usingEnvMode = requiresApiKey && apiKeyMode === 'env';
+
+        // Validate
+        if (!modelForm.label) {
+            alert('Label is required');
+            return;
+        }
+        if (!modelForm.model_name) {
+            alert('Model name is required');
+            return;
+        }
+        if (modelForm.type === 'ollama' && !modelForm.base_url) {
+            alert('Base URL is required for Ollama models');
+            return;
+        }
+        if (modelForm.type === 'openrouter') {
+            if (usingEnvMode && !envVarName.trim()) {
+                alert('Environment variable name is required for OpenRouter models');
+                return;
+            }
+            if (!usingEnvMode && !modelForm.api_key) {
+                alert('API Key is required for OpenRouter models');
+                return;
+            }
+        }
+        if (modelForm.type === 'openai-compatible') {
+            if (!modelForm.base_url) {
+                alert('Base URL is required for OpenAI-compatible models');
+                return;
+            }
+            if (usingEnvMode && !envVarName.trim()) {
+                alert('Environment variable name is required for OpenAI-compatible models');
+                return;
+            }
+            if (!usingEnvMode && !modelForm.api_key) {
+                alert('API Key is required for OpenAI-compatible models');
+                return;
             }
         }
 
-        setConfig({ ...config, council_models: newModels });
-    };
-
-    const addCouncilModel = () => {
-        setConfig({
-            ...config,
-            council_models: [...config.council_models, { name: '', provider: 'ollama' }]
-        });
-    };
-
-    const removeCouncilModel = (index) => {
-        const newModels = config.council_models.filter((_, i) => i !== index);
-        setConfig({ ...config, council_models: newModels });
-    };
-
-    const updateProviderConfig = (provider, field, value) => {
-        setConfig({
-            ...config,
-            providers: {
-                ...config.providers,
-                [provider]: {
-                    ...config.providers[provider],
-                    [field]: value
-                }
+        const apiKeyToSave = (() => {
+            if (!requiresApiKey) {
+                return '';
             }
-        });
-    };
-
-    // OpenAI specific management
-    const addOpenAIConfig = () => {
-        const newConfig = {
-            name: `Config ${config.providers.openai.length + 1}`,
-            base_url: 'https://api.openai.com/v1',
-            api_key: ''
-        };
-        setConfig({
-            ...config,
-            providers: {
-                ...config.providers,
-                openai: [...(config.providers.openai || []), newConfig]
+            if (usingEnvMode) {
+                return `env:${envVarName.trim()}`;
             }
-        });
-    };
+            return modelForm.api_key;
+        })();
 
-    const removeOpenAIConfig = (index) => {
-        const newConfigs = [...config.providers.openai];
-        newConfigs.splice(index, 1);
-        setConfig({
-            ...config,
-            providers: {
-                ...config.providers,
-                openai: newConfigs
-            }
-        });
-    };
+        const newModels = { ...models };
 
-    const updateOpenAIConfig = (index, field, value) => {
-        const newConfigs = [...config.providers.openai];
-        newConfigs[index] = { ...newConfigs[index], [field]: value };
-        setConfig({
-            ...config,
-            providers: {
-                ...config.providers,
-                openai: newConfigs
-            }
-        });
-    };
-
-    const getProviderHelp = (provider) => {
-        switch (provider) {
-            case 'ollama':
-                return {
-                    text: 'Local models (free). List available: ollama list',
-                    link: 'https://ollama.com/library',
-                    linkText: 'Browse Models'
-                };
-            case 'openrouter':
-                return {
-                    text: 'Cloud models (paid). Use format: provider/model-name',
-                    link: 'https://openrouter.ai/models',
-                    linkText: 'Browse Models'
-                };
-            case 'openai':
-                return {
-                    text: 'OpenAI or compatible endpoints',
-                    link: 'https://platform.openai.com/docs/models',
-                    linkText: 'View Docs'
-                };
-            default:
-                return { text: '', link: '', linkText: '' };
+        if (editingModel) {
+            // Update existing
+            newModels[editingModel] = {
+                ...modelForm,
+                api_key: apiKeyToSave
+            };
+        } else {
+            // Add new
+            newModels[modelId] = {
+                ...modelForm,
+                api_key: apiKeyToSave
+            };
         }
+
+        setModels(newModels);
+        setConfig({ ...config, models: newModels });
+        closeModelEditor();
+    };
+
+    const deleteModel = (modelId) => {
+        // Check if in use
+        const councilModels = config?.council_models || [];
+        const chairmanModel = config?.chairman_model;
+
+        if (councilModels.includes(modelId)) {
+            alert('Cannot delete: Model is in use by council');
+            return;
+        }
+        if (chairmanModel === modelId) {
+            alert('Cannot delete: Model is in use as chairman');
+            return;
+        }
+
+        if (!confirm(`Delete model "${models[modelId]?.label}"?`)) {
+            return;
+        }
+
+        const newModels = { ...models };
+        delete newModels[modelId];
+        setModels(newModels);
+        setConfig({ ...config, models: newModels });
+    };
+
+    const toggleCouncilModel = (modelId) => {
+        const councilModels = config?.council_models || [];
+        const newCouncilModels = councilModels.includes(modelId)
+            ? councilModels.filter(id => id !== modelId)
+            : [...councilModels, modelId];
+
+        setConfig({ ...config, council_models: newCouncilModels });
+    };
+
+    const setChairmanModel = (modelId) => {
+        setConfig({ ...config, chairman_model: modelId });
     };
 
     if (!isOpen) return null;
+    if (loading) return <div className="settings-modal-overlay"><div className="settings-modal">Loading...</div></div>;
+
+    const ollamaSettings = config?.ollama_settings || { num_ctx: 4096, serialize_requests: false };
+    const councilModels = config?.council_models || [];
+    const chairmanModel = config?.chairman_model;
 
     return (
-        <div className="settings-modal-overlay">
-            <div className="settings-modal">
+        <div className="settings-modal-overlay" onClick={onClose}>
+            <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
                 <div className="settings-header">
                     <h2>Settings</h2>
-                    <button className="close-button" onClick={onClose}>&times;</button>
+                    <button className="close-button" onClick={onClose}>×</button>
                 </div>
 
-                {loading ? (
-                    <div className="loading">Loading settings...</div>
-                ) : (
-                    <div className="settings-content">
-                        {status.message && (
-                            <div className={`status-message ${status.type}`}>
-                                {status.message}
-                            </div>
-                        )}
+                {/* Tabs */}
+                <div className="settings-tabs">
+                    <button
+                        className={activeTab === 'models' ? 'active' : ''}
+                        onClick={() => setActiveTab('models')}
+                    >
+                        Models
+                    </button>
+                    <button
+                        className={activeTab === 'other' ? 'active' : ''}
+                        onClick={() => setActiveTab('other')}
+                    >
+                        Other Settings
+                    </button>
+                    <button
+                        className={activeTab === 'council' ? 'active' : ''}
+                        onClick={() => setActiveTab('council')}
+                    >
+                        Council Configuration
+                    </button>
+                </div>
 
-                        <div className="providers-section">
-                            <h3>Provider Configurations</h3>
-                            <p className="section-help">Configure credentials for providers you want to use. The same API key can be used for multiple models from the same provider.</p>
-
-                            {/* Ollama */}
-                            <div className="provider-config">
-                                <div
-                                    className="provider-header"
-                                    onClick={() => toggleProvider('ollama')}
-                                >
-                                    <h4>
-                                        <span className="toggle-icon">{expandedProviders.ollama ? '▼' : '▶'}</span>
-                                        Ollama (Local)
-                                    </h4>
-                                    <span className="provider-badge ollama">Free</span>
-                                </div>
-                                {expandedProviders.ollama && (
-                                    <div className="provider-content">
-                                        <div className="form-group">
-                                            <label>Base URL</label>
-                                            <input
-                                                type="text"
-                                                value={config.providers.ollama?.base_url || ''}
-                                                onChange={(e) => updateProviderConfig('ollama', 'base_url', e.target.value)}
-                                                placeholder="http://localhost:11434"
-                                            />
-                                            <small>
-                                                Ensure Ollama is running. <a href="https://ollama.com/library" target="_blank" rel="noopener noreferrer">Browse models</a>
-                                            </small>
-                                        </div>
-                                        <div className="form-group">
-                                            <label>Max context tokens (applied to this app only)</label>
-                                            <input
-                                                type="number"
-                                                min="512"
-                                                step="512"
-                                                value={config.providers.ollama?.num_ctx ?? 4096}
-                                                onChange={(e) => updateProviderConfig('ollama', 'num_ctx', Number(e.target.value))}
-                                                placeholder="e.g., 4096"
-                                            />
-                                            <small>Lower values reduce VRAM usage and prevent load failures.</small>
-                                        </div>
-                                        <div className="form-group checkbox-row">
-                                            <label className="checkbox-label">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={!!config.serialize_local_models}
-                                                    onChange={(e) => setConfig({
-                                                        ...config,
-                                                        serialize_local_models: e.target.checked
-                                                    })}
-                                                />
-                                                Run local models one after another (serialize Ollama calls)
-                                            </label>
-                                            <small>
-                                                Prevents GPU thrash by queuing Ollama requests instead of running them in parallel.
-                                            </small>
-                                        </div>
-                                    </div>
-                                )}
+                <div className="settings-content">
+                    {/* Models Tab */}
+                    {activeTab === 'models' && (
+                        <div className="models-section">
+                            <div className="section-header">
+                                <h3>Configured Models</h3>
+                                <button className="add-button" onClick={() => openModelEditor()}>
+                                    + Add Model
+                                </button>
                             </div>
 
-                            {/* OpenRouter */}
-                            <div className="provider-config">
-                                <div
-                                    className="provider-header"
-                                    onClick={() => toggleProvider('openrouter')}
-                                >
-                                    <h4>
-                                        <span className="toggle-icon">{expandedProviders.openrouter ? '▼' : '▶'}</span>
-                                        OpenRouter (Cloud)
-                                    </h4>
-                                    <span className="provider-badge openrouter">Paid</span>
-                                </div>
-                                {expandedProviders.openrouter && (
-                                    <div className="provider-content">
-                                        <div className="form-group">
-                                            <label>API Key</label>
-                                            <input
-                                                type="password"
-                                                value={config.providers.openrouter?.api_key || ''}
-                                                onChange={(e) => updateProviderConfig('openrouter', 'api_key', e.target.value)}
-                                                placeholder="sk-or-v1-..."
-                                            />
-                                            <small>
-                                                Get your API key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">OpenRouter dashboard</a>
-                                            </small>
-                                        </div>
-                                        <div className="popular-models">
-                                            <strong>Popular models:</strong>
-                                            <ul>
-                                                {POPULAR_OPENROUTER_MODELS.slice(0, 4).map(model => (
-                                                    <li key={model}><code>{model}</code></li>
-                                                ))}
-                                            </ul>
-                                            <a href="https://openrouter.ai/models" target="_blank" rel="noopener noreferrer">View all models →</a>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* OpenAI */}
-                            <div className="provider-config">
-                                <div
-                                    className="provider-header"
-                                    onClick={() => toggleProvider('openai')}
-                                >
-                                    <h4>
-                                        <span className="toggle-icon">{expandedProviders.openai ? '▼' : '▶'}</span>
-                                        OpenAI Compatible
-                                    </h4>
-                                    <span className="provider-badge openai">Paid</span>
-                                </div>
-                                {expandedProviders.openai && (
-                                    <div className="provider-content">
-                                        <div className="openai-configs-list">
-                                            {(config.providers.openai || []).map((conf, index) => (
-                                                <div key={index} className="openai-config-item">
-                                                    <div className="openai-config-header">
-                                                        <input
-                                                            type="text"
-                                                            className="config-name-input"
-                                                            value={conf.name}
-                                                            onChange={(e) => updateOpenAIConfig(index, 'name', e.target.value)}
-                                                            placeholder="Provider Name (e.g. OpenAI, LocalAI)"
-                                                        />
-                                                        <button
-                                                            className="remove-config-button"
-                                                            onClick={() => removeOpenAIConfig(index)}
-                                                            title="Remove this configuration"
-                                                        >
-                                                            &times;
-                                                        </button>
-                                                    </div>
-                                                    <div className="form-group">
-                                                        <label>Base URL</label>
-                                                        <input
-                                                            type="text"
-                                                            value={conf.base_url || ''}
-                                                            onChange={(e) => updateOpenAIConfig(index, 'base_url', e.target.value)}
-                                                            placeholder="https://api.openai.com/v1"
-                                                        />
-                                                    </div>
-                                                    <div className="form-group">
-                                                        <label>API Key</label>
-                                                        <input
-                                                            type="password"
-                                                            value={conf.api_key || ''}
-                                                            onChange={(e) => updateOpenAIConfig(index, 'api_key', e.target.value)}
-                                                            placeholder="sk-..."
-                                                        />
-                                                    </div>
-                                                </div>
-                                            ))}
-                                            <button className="add-config-button" onClick={addOpenAIConfig}>
-                                                + Add OpenAI Configuration
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-
-                        <hr />
-
-                        <h3>Council Models</h3>
-                        <p className="section-help">Add models that will provide diverse perspectives. You can mix models from different providers.</p>
-                        <div className="council-models-list">
-                            {config.council_models.map((model, index) => {
-                                const help = getProviderHelp(model.provider || 'ollama');
-                                return (
-                                    <div key={index} className="model-row-container">
-                                        <div className="model-row">
-                                            <select
-                                                value={model.provider || 'ollama'}
-                                                onChange={(e) => handleCouncilModelChange(index, 'provider', e.target.value)}
-                                                className="provider-select"
-                                            >
-                                                {PROVIDERS.map(p => (
-                                                    <option key={p.id} value={p.id}>{p.name}</option>
-                                                ))}
-                                            </select>
-
-                                            {model.provider === 'openai' && (
-                                                <select
-                                                    value={model.openai_config_name || (config.providers.openai?.[0]?.name) || ''}
-                                                    onChange={(e) => handleCouncilModelChange(index, 'openai_config_name', e.target.value)}
-                                                    className="openai-config-select"
-                                                >
-                                                    {(config.providers.openai || []).map(conf => (
-                                                        <option key={conf.name} value={conf.name}>{conf.name}</option>
-                                                    ))}
-                                                </select>
-                                            )}
-
-                                            <input
-                                                type="text"
-                                                value={model.name || ''}
-                                                onChange={(e) => handleCouncilModelChange(index, 'name', e.target.value)}
-                                                placeholder={
-                                                    model.provider === 'openrouter'
-                                                        ? 'e.g., anthropic/claude-3.5-sonnet'
-                                                        : model.provider === 'ollama'
-                                                            ? 'e.g., deepseek-r1:1.5b'
-                                                            : 'Model name'
-                                                }
-                                                list={
-                                                    model.provider === 'openai'
-                                                        ? `available-models-openai:${model.openai_config_name || (config.providers.openai?.[0]?.name) || ''}`
-                                                        : `available-models-${model.provider || 'ollama'}`
-                                                }
-                                            />
-                                            <button className="remove-button" onClick={() => removeCouncilModel(index)}>&times;</button>
-                                        </div>
-                                        {help.text && (
-                                            <div className="model-help">
-                                                <small>
-                                                    {help.text} {help.link && (
-                                                        <a href={help.link} target="_blank" rel="noopener noreferrer">{help.linkText}</a>
-                                                    )}
-                                                </small>
+                            {Object.keys(models).length === 0 ? (
+                                <p className="empty-message">No models configured. Click "Add Model" to get started.</p>
+                            ) : (
+                                <div className="models-list">
+                                    {Object.entries(models).map(([modelId, model]) => (
+                                        <div key={modelId} className="model-card">
+                                            <div className="model-card-header">
+                                                <span className="model-label">{model.label}</span>
+                                                <span className={`model-type-badge ${model.type}`}>
+                                                    {model.type === 'openai-compatible' ? 'OpenAI' :
+                                                        model.type === 'openrouter' ? 'OpenRouter' : 'Ollama'}
+                                                </span>
                                             </div>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                            <button className="add-button" onClick={addCouncilModel}>+ Add Model</button>
-                        </div>
-
-                        <hr />
-
-                        <h3>Chairman Model</h3>
-                        <p className="section-help">The model that synthesizes the final answer based on council input.</p>
-                        <div className="model-row-container">
-                            <div className="model-row">
-                                <select
-                                    value={config.chairman_model?.provider || 'ollama'}
-                                    onChange={(e) => {
-                                        const newProvider = e.target.value;
-                                        const updates = { provider: newProvider };
-                                        if (newProvider === 'openai' && !config.chairman_model.openai_config_name) {
-                                            if (config.providers.openai && config.providers.openai.length > 0) {
-                                                updates.openai_config_name = config.providers.openai[0].name;
-                                            }
-                                        }
-                                        setConfig({
-                                            ...config,
-                                            chairman_model: {
-                                                ...config.chairman_model,
-                                                ...updates
-                                            }
-                                        });
-                                    }}
-                                    className="provider-select"
-                                >
-                                    {PROVIDERS.map(p => (
-                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                            <div className="model-card-details">
+                                                <div><strong>Model:</strong> {model.model_name}</div>
+                                                {model.base_url && <div><strong>URL:</strong> {model.base_url}</div>}
+                                                {model.api_key && (
+                                                    <div>
+                                                        <strong>API Key:</strong> {model.api_key.startsWith('env:') ? model.api_key : '*** (hidden)'}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="model-card-actions">
+                                                <button onClick={() => openModelEditor(modelId)}>Edit</button>
+                                                <button onClick={() => deleteModel(modelId)} className="delete-btn">Delete</button>
+                                            </div>
+                                        </div>
                                     ))}
-                                </select>
+                                </div>
+                            )}
+                        </div>
+                    )}
 
-                                {config.chairman_model?.provider === 'openai' && (
-                                    <select
-                                        value={config.chairman_model.openai_config_name || (config.providers.openai?.[0]?.name) || ''}
+                    {/* Ollama Settings Tab */}
+                    {activeTab === 'other' && (
+                        <div className="other-section">
+                            <div className="general-section">
+                                <h3>General</h3>
+                                <label className="checkbox-label general-checkbox">
+                                    <input
+                                        type="checkbox"
+                                        checked={generalSettings.use_env_for_api_keys}
                                         onChange={(e) => setConfig({
                                             ...config,
-                                            chairman_model: {
-                                                ...config.chairman_model,
-                                                openai_config_name: e.target.value
+                                            general_settings: {
+                                                ...generalSettings,
+                                                use_env_for_api_keys: e.target.checked
                                             }
                                         })}
-                                        className="openai-config-select"
+                                    />
+                                    <span>Store API Key as ENV variable, not in json</span>
+                                </label>
+                                <p className="api-key-note">Keeps secrets in environment variables while preserving env: references in the UI.</p>
+                            </div>
+
+                            <div className="ollama-section">
+                                <h3>Global Ollama Settings</h3>
+                                <p className="section-help">These settings apply to all Ollama models.</p>
+
+                                <div className="form-group">
+                                    <label>Context Window (num_ctx)</label>
+                                    <input
+                                        type="number"
+                                        min="512"
+                                        step="512"
+                                        value={ollamaSettings.num_ctx}
+                                        onChange={(e) => setConfig({
+                                            ...config,
+                                            ollama_settings: {
+                                                ...ollamaSettings,
+                                                num_ctx: parseInt(e.target.value) || 4096
+                                            }
+                                        })}
+                                    />
+                                    <small>Context window size for Ollama models. Larger values require more VRAM.</small>
+                                </div>
+
+                                <div className="form-group">
+                                    <label className="checkbox-label">
+                                        <input
+                                            type="checkbox"
+                                            checked={ollamaSettings.serialize_requests}
+                                            onChange={(e) => setConfig({
+                                                ...config,
+                                                ollama_settings: {
+                                                    ...ollamaSettings,
+                                                    serialize_requests: e.target.checked
+                                                }
+                                            })}
+                                        />
+                                        <span>Serialize Ollama Requests</span>
+                                    </label>
+                                    <small>Run Ollama models sequentially to avoid GPU thrashing.</small>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Council Configuration Tab */}
+                    {activeTab === 'council' && (
+                        <div className="council-section">
+                            <h3>Council Models</h3>
+                            <p className="section-help">Select which models participate in the council.</p>
+
+                            {Object.keys(models).length === 0 ? (
+                                <p className="empty-message">No models configured. Add models in the "Models" tab first.</p>
+                            ) : (
+                                <div className="model-selection-list">
+                                    {Object.entries(models).map(([modelId, model]) => (
+                                        <label key={modelId} className="model-checkbox">
+                                            <input
+                                                type="checkbox"
+                                                checked={councilModels.includes(modelId)}
+                                                onChange={() => toggleCouncilModel(modelId)}
+                                            />
+                                            <span>{model.label} ({model.model_name})</span>
+                                        </label>
+                                    ))}
+                                </div>
+                            )}
+
+                            <hr />
+
+                            <h3>Chairman Model</h3>
+                            <p className="section-help">Select the model that synthesizes the final answer.</p>
+
+                            {Object.keys(models).length === 0 ? (
+                                <p className="empty-message">No models configured. Add models in the "Models" tab first.</p>
+                            ) : (
+                                <div className="chairman-selection">
+                                    <select
+                                        value={chairmanModel || ''}
+                                        onChange={(e) => setChairmanModel(e.target.value)}
                                     >
-                                        {(config.providers.openai || []).map(conf => (
-                                            <option key={conf.name} value={conf.name}>{conf.name}</option>
+                                        <option value="">-- Select Chairman --</option>
+                                        {Object.entries(models).map(([modelId, model]) => (
+                                            <option key={modelId} value={modelId}>
+                                                {model.label} ({model.model_name})
+                                            </option>
                                         ))}
                                     </select>
-                                )}
-
-                                <input
-                                    type="text"
-                                    value={config.chairman_model?.name || ''}
-                                    onChange={(e) => setConfig({
-                                        ...config,
-                                        chairman_model: {
-                                            ...config.chairman_model,
-                                            name: e.target.value
-                                        }
-                                    })}
-                                    placeholder={
-                                        config.chairman_model?.provider === 'openrouter'
-                                            ? 'e.g., anthropic/claude-3.5-sonnet'
-                                            : config.chairman_model?.provider === 'ollama'
-                                                ? 'e.g., deepseek-r1:1.5b'
-                                                : 'Model name'
-                                    }
-                                    list={`available-models-${config.chairman_model?.provider || 'ollama'}`}
-                                />
-                            </div>
-                            {(() => {
-                                const help = getProviderHelp(config.chairman_model?.provider || 'ollama');
-                                return help.text && (
-                                    <div className="model-help">
-                                        <small>
-                                            {help.text} {help.link && (
-                                                <a href={help.link} target="_blank" rel="noopener noreferrer">{help.linkText}</a>
-                                            )}
-                                        </small>
-                                    </div>
-                                );
-                            })()}
+                                </div>
+                            )}
                         </div>
-
-
-                        {/* Datalists for autocomplete */}
-                        {Object.entries(availableModels).map(([provider, models]) => (
-                            <datalist key={provider} id={`available-models-${provider}`}>
-                                {models.map(m => (
-                                    <option key={m} value={m} />
-                                ))}
-                            </datalist>
-                        ))}
-
-                    </div>
-                )}
+                    )}
+                </div>
 
                 <div className="settings-footer">
                     <button className="cancel-button" onClick={onClose}>Cancel</button>
@@ -673,6 +407,114 @@ function SettingsModal({ isOpen, onClose }) {
                         {saving ? 'Saving...' : 'Save Changes'}
                     </button>
                 </div>
+
+                {/* Model Editor Modal */}
+                {showModelEditor && (
+                    <div className="modal-overlay" onClick={closeModelEditor}>
+                        <div className="model-editor-modal" onClick={(e) => e.stopPropagation()}>
+                            <h3>{editingModel ? 'Edit Model' : 'Add New Model'}</h3>
+
+                            <div className="form-group">
+                                <label>Label*</label>
+                                <input
+                                    type="text"
+                                    value={modelForm.label}
+                                    onChange={(e) => setModelForm({ ...modelForm, label: e.target.value })}
+                                    placeholder="e.g., My Local Llama"
+                                />
+                            </div>
+
+                            <div className="form-group">
+                                <label>Type*</label>
+                                <select
+                                    value={modelForm.type}
+                                    onChange={(e) => setModelForm({ ...modelForm, type: e.target.value })}
+                                >
+                                    <option value="ollama">Ollama</option>
+                                    <option value="openrouter">OpenRouter</option>
+                                    <option value="openai-compatible">OpenAI Compatible</option>
+                                </select>
+                            </div>
+
+                            <div className="form-group">
+                                <label>Model Name*</label>
+                                <input
+                                    type="text"
+                                    value={modelForm.model_name}
+                                    onChange={(e) => setModelForm({ ...modelForm, model_name: e.target.value })}
+                                    placeholder={
+                                        modelForm.type === 'ollama' ? 'e.g., llama2' :
+                                            modelForm.type === 'openrouter' ? 'e.g., anthropic/claude-3.5-sonnet' :
+                                                'e.g., gpt-4'
+                                    }
+                                />
+                            </div>
+
+                            {(modelForm.type === 'ollama' || modelForm.type === 'openai-compatible') && (
+                                <div className="form-group">
+                                    <label>Base URL*</label>
+                                    <input
+                                        type="text"
+                                        value={modelForm.base_url}
+                                        onChange={(e) => setModelForm({ ...modelForm, base_url: e.target.value })}
+                                        placeholder="e.g., http://localhost:11434"
+                                    />
+                                </div>
+                            )}
+
+                            {(modelForm.type === 'openrouter' || modelForm.type === 'openai-compatible') && (
+                                <div className={`form-group api-key-group ${apiKeyMode === 'env' ? 'env-mode' : 'direct-mode'}`}>
+                                    <div className="api-key-header">
+                                        <label>API Key*</label>
+                                        <div className="api-key-toggle">
+                                            <button
+                                                type="button"
+                                                className={apiKeyMode === 'direct' ? 'active' : ''}
+                                                onClick={() => setApiKeyMode('direct')}
+                                            >
+                                                Direct
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={apiKeyMode === 'env' ? 'active' : ''}
+                                                onClick={() => setApiKeyMode('env')}
+                                            >
+                                                Env Var
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {apiKeyMode === 'env' ? (
+                                        <>
+                                            <input
+                                                type="text"
+                                                className="env-input"
+                                                value={envVarName}
+                                                onChange={(e) => setEnvVarName(e.target.value.replace(/[^A-Za-z0-9_]/g, '_').toUpperCase())}
+                                                placeholder="e.g., MODEL_MYMODEL_API_KEY"
+                                            />
+                                            <small className="api-key-note">Saved as env:{envVarName || 'VAR_NAME'} so the key stays outside config.json.</small>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <input
+                                                type="password"
+                                                value={modelForm.api_key}
+                                                onChange={(e) => setModelForm({ ...modelForm, api_key: e.target.value })}
+                                                placeholder="sk-..."
+                                            />
+                                            <small className="api-key-note">Leave as *** to keep the existing key.</small>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="modal-actions">
+                                <button onClick={closeModelEditor}>Cancel</button>
+                                <button onClick={saveModel} className="primary">Save Model</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
     );

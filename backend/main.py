@@ -8,8 +8,19 @@ from typing import List, Dict, Any
 import uuid
 import json
 import asyncio
-from redis import Redis
-from rq import Queue
+
+try:
+    from redis import Redis
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from rq import Queue
+    from rq import Worker
+except Exception:
+    # Optional dependency: allow the API to run without Redis/RQ installed
+    Redis = None
+    Queue = None
+    Worker = None
+    RedisConnectionError = Exception
+    print("Warning: redis/rq not installed; background jobs will run inline.")
 
 from . import storage, jobs
 from .council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings
@@ -19,8 +30,45 @@ from .worker import process_council_job
 app = FastAPI(title="LLM Council API")
 
 # Initialize Redis connection and RQ queue
-redis_conn = Redis.from_url(REDIS_URL)
-task_queue = Queue("council", connection=redis_conn)
+redis_conn = None
+task_queue = None
+
+if Redis and Queue:
+    try:
+        redis_conn = Redis.from_url(REDIS_URL)
+        task_queue = Queue("council", connection=redis_conn)
+    except Exception as e:
+        print(f"Warning: Unable to initialize Redis queue ({e}); falling back to inline jobs.")
+
+
+def _has_active_worker(queue: Queue) -> bool:
+    """
+    Check if there is at least one worker listening on the given queue.
+
+    Returns False if we cannot inspect workers (e.g., Redis down).
+    """
+    if not queue or not Worker:
+        return False
+    try:
+        workers = Worker.all(queue=queue)
+        return any(queue.name in worker.queue_names() for worker in workers)
+    except Exception as e:
+        print(f"Warning: Unable to inspect RQ workers ({e}); treating as no workers.")
+        return False
+
+
+async def _run_job_inline(job_id: str, conversation_id: str, user_query: str):
+    """
+    Run the council job in-process when Redis/RQ is unavailable.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(
+            None, process_council_job, job_id, conversation_id, user_query
+        )
+    except Exception as e:
+        # process_council_job already updates job status on failure
+        print(f"Inline processing failed for job {job_id}: {e}")
 
 # Enable CORS for local and network development
 app.add_middleware(
@@ -57,6 +105,17 @@ class Conversation(BaseModel):
     created_at: str
     title: str
     messages: List[Dict[str, Any]]
+
+
+def _validate_api_key_format(api_key_value: Any, provider_label: str):
+    """Validate API key presence or env var reference format."""
+    if isinstance(api_key_value, str) and api_key_value.startswith("env:"):
+        env_var_name = api_key_value[4:].strip()
+        if not env_var_name:
+            raise HTTPException(status_code=400, detail=f"Environment variable name is required for {provider_label} API key")
+        return
+    if not api_key_value:
+        raise HTTPException(status_code=400, detail=f"API key is required for {provider_label} models")
 
 
 @app.get("/")
@@ -170,14 +229,26 @@ async def send_message_async(conversation_id: str, request: SendMessageRequest):
     # Create job record
     jobs.create_job(job_id, conversation_id, request.content)
 
-    # Enqueue the job for background processing
-    task_queue.enqueue(
-        process_council_job,
-        job_id,
-        conversation_id,
-        request.content,
-        job_timeout='30m'  # 30 minutes timeout
-    )
+    # Enqueue the job for background processing, or fall back to inline execution
+    enqueued = False
+    if task_queue:
+        try:
+            if _has_active_worker(task_queue):
+                task_queue.enqueue(
+                    process_council_job,
+                    job_id,
+                    conversation_id,
+                    request.content,
+                    job_timeout='30m'  # 30 minutes timeout
+                )
+                enqueued = True
+            else:
+                print("No active RQ workers found; running job inline.")
+        except (RedisConnectionError, Exception) as e:
+            print(f"Failed to enqueue job {job_id}, running inline instead: {e}")
+
+    if not enqueued:
+        asyncio.create_task(_run_job_inline(job_id, conversation_id, request.content))
 
     # Start title generation in parallel if first message
     if is_first_message:
@@ -292,7 +363,7 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
 async def get_config():
     """Get current configuration."""
     from .config import config_manager
-    return config_manager.get_config()
+    return config_manager.get_config(mask_sensitive=True)
 
 
 @app.post("/api/config")
@@ -304,7 +375,173 @@ async def update_config(config: Dict[str, Any]):
     updated = config_manager.update_config(config)
     # Reset cached providers so credential changes take effect immediately
     ProviderFactory.clear_cache()
-    return updated
+    return config_manager.get_config(mask_sensitive=True)
+
+
+# Model Registry CRUD Endpoints
+
+@app.get("/api/models")
+async def get_models():
+    """Get all configured models from the registry."""
+    from .config import config_manager
+    config = config_manager.get_config(mask_sensitive=True)
+    return {"models": config.get("models", {})}
+
+
+@app.post("/api/models")
+async def add_model(model_data: Dict[str, Any]):
+    """Add a new model to the registry."""
+    from .config import config_manager
+    from .providers import ProviderFactory
+    import uuid
+    
+    config = config_manager.get_config()
+    models = config.get("models", {})
+    ollama_settings = config.get("ollama_settings", {})
+    
+    # Generate ID
+    model_id = str(uuid.uuid4())
+    
+    # Validate required fields based on type
+    model_type = model_data.get("type")
+    if not model_type:
+        raise HTTPException(status_code=400, detail="Model type is required")
+    
+    if model_type not in ["ollama", "openrouter", "openai-compatible"]:
+        raise HTTPException(status_code=400, detail=f"Invalid model type: {model_type}")
+    
+    if not model_data.get("label"):
+        raise HTTPException(status_code=400, detail="Label is required")
+    
+    if not model_data.get("model_name"):
+        raise HTTPException(status_code=400, detail="Model name is required")
+    
+    # Type-specific validation
+    api_key_value = model_data.get("api_key", "")
+
+    if model_type == "ollama":
+        if not model_data.get("base_url"):
+            raise HTTPException(status_code=400, detail="Base URL is required for Ollama models")
+    elif model_type == "openrouter":
+        _validate_api_key_format(api_key_value, "OpenRouter")
+    elif model_type == "openai-compatible":
+        if not model_data.get("base_url"):
+            raise HTTPException(status_code=400, detail="Base URL is required for OpenAI-compatible models")
+        _validate_api_key_format(api_key_value, "OpenAI-compatible")
+    
+    # Add model
+    models[model_id] = {
+        "label": model_data.get("label"),
+        "type": model_type,
+        "model_name": model_data.get("model_name"),
+        "base_url": model_data.get("base_url"),
+        "api_key": model_data.get("api_key")
+    }
+
+    # Validate provider creation early to surface env var errors
+    try:
+        ProviderFactory.get_provider_from_model_config(models[model_id], ollama_settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    config["models"] = models
+    config_manager.update_config(config)
+    
+    # Clear provider cache
+    ProviderFactory.clear_cache()
+    
+    sanitized_config = config_manager.get_config(mask_sensitive=True)
+    return {"model_id": model_id, "model": sanitized_config.get("models", {}).get(model_id, {})}
+
+
+@app.put("/api/models/{model_id}")
+async def update_model(model_id: str, model_data: Dict[str, Any]):
+    """Update an existing model in the registry."""
+    from .config import config_manager
+    from .providers import ProviderFactory
+    
+    config = config_manager.get_config()
+    models = config.get("models", {})
+    ollama_settings = config.get("ollama_settings", {})
+    
+    if model_id not in models:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    existing_model = models.get(model_id, {})
+    proposed_model = {**existing_model, **model_data}
+
+    if "api_key" in model_data:
+        incoming_key = model_data.get("api_key", "")
+        if incoming_key == "***":
+            proposed_model["api_key"] = existing_model.get("api_key", "")
+        else:
+            proposed_model["api_key"] = incoming_key
+
+    model_type = proposed_model.get("type", existing_model.get("type"))
+    api_key_value = proposed_model.get("api_key", "")
+
+    if model_type == "ollama":
+        if not proposed_model.get("base_url"):
+            raise HTTPException(status_code=400, detail="Base URL is required for Ollama models")
+    elif model_type == "openrouter":
+        _validate_api_key_format(api_key_value, "OpenRouter")
+    elif model_type == "openai-compatible":
+        if not proposed_model.get("base_url"):
+            raise HTTPException(status_code=400, detail="Base URL is required for OpenAI-compatible models")
+        _validate_api_key_format(api_key_value, "OpenAI-compatible")
+
+    # Validate provider creation to surface env var errors early
+    try:
+        ProviderFactory.get_provider_from_model_config(proposed_model, ollama_settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    models[model_id] = proposed_model
+    config["models"] = models
+    config_manager.update_config(config)
+    
+    # Clear provider cache
+    ProviderFactory.clear_cache()
+    
+    sanitized_config = config_manager.get_config(mask_sensitive=True)
+    return {"model_id": model_id, "model": sanitized_config.get("models", {}).get(model_id, {})}
+
+
+@app.delete("/api/models/{model_id}")
+async def delete_model(model_id: str):
+    """Delete a model from the registry."""
+    from .config import config_manager
+    
+    config = config_manager.get_config()
+    models = config.get("models", {})
+    
+    if model_id not in models:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    # Check if model is in use
+    council_models = config.get("council_models", [])
+    chairman_model = config.get("chairman_model")
+    
+    if model_id in council_models:
+        raise HTTPException(status_code=400, detail="Model is in use by council")
+    if model_id == chairman_model:
+        raise HTTPException(status_code=400, detail="Model is in use as chairman")
+    
+    # Delete model
+    del models[model_id]
+    
+    config["models"] = models
+    config_manager.update_config(config)
+    
+    # Clear provider cache
+    from .providers import ProviderFactory
+    ProviderFactory.clear_cache()
+    
+    return {"message": "Model deleted successfully"}
 
 
 @app.get("/api/models/all")
@@ -315,11 +552,13 @@ async def list_all_models():
     
     config = config_manager.get_config()
     providers_config = config.get("providers", {})
-    
     all_models = {}
-    
-    # Get all configured providers
-    providers = ProviderFactory.get_all_providers(providers_config)
+
+    try:
+        # Get all configured providers
+        providers = ProviderFactory.get_all_providers(providers_config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     
     # Query each provider for its models
     for provider_name, provider_instance in providers.items():
@@ -334,7 +573,7 @@ async def list_all_models():
 
 
 @app.get("/api/models/{provider}")
-async def list_models(provider: str):
+async def list_models(provider: str, config_name: str = None):
     """List available models for a specific provider."""
     from .config import config_manager
     from .providers import ProviderFactory
@@ -347,11 +586,15 @@ async def list_models(provider: str):
     
     # Create a dummy model config to get the provider instance
     dummy_model_config = {"name": "dummy", "provider": provider}
+    if config_name:
+        dummy_model_config["openai_config_name"] = config_name
     
     try:
         provider_instance = ProviderFactory.get_provider_for_model(dummy_model_config, providers_config)
         models = await provider_instance.list_models()
         return {"models": models}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"Error listing models for {provider}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -359,4 +602,4 @@ async def list_models(provider: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8010)
