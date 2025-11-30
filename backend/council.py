@@ -6,16 +6,45 @@ from .config import config_manager
 from .providers import ProviderFactory
 
 
+def resolve_model_configs_from_ids(model_ids: List[str], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Resolve model IDs to full model configurations from registry.
+    
+    Args:
+        model_ids: List of model IDs (may contain old format dicts or new format string IDs)
+        config: Full configuration with models registry
+    
+    Returns:
+        List of model configs with registry data
+    """
+    models_registry = config.get("models", {})
+    resolved = []
+    
+    for model_id in model_ids:
+        # Skip old format (dicts) - only process new format (string IDs)
+        if not isinstance(model_id, str):
+            print(f"Warning: Skipping old format model config in council_models: {model_id}")
+            continue
+            
+        if model_id in models_registry:
+            model_config = models_registry[model_id].copy()
+            model_config["id"] = model_id
+            resolved.append(model_config)
+    
+    return resolved
+
+
 def build_model_key(model_config: Dict[str, Any]) -> str:
     """
     Build a stable identifier for a model configuration.
     Includes provider and OpenAI config name (when present) to avoid collisions.
     """
-    provider = model_config.get("provider", "openrouter")
-    model_name = model_config.get("name", "")
+    # Support both new registry format (type/model_name) and legacy (provider/name)
+    provider = model_config.get("type") or model_config.get("provider", "openrouter")
+    model_name = model_config.get("model_name") or model_config.get("name", "")
     parts = [provider]
 
-    if provider == "openai":
+    if provider in ("openai", "openai-compatible"):
         parts.append(model_config.get("openai_config_name", "default"))
 
     parts.append(model_name)
@@ -26,10 +55,11 @@ def build_model_display_name(model_config: Dict[str, Any]) -> str:
     """
     Human-friendly label that includes the provider/config when useful.
     """
-    model_name = model_config.get("name", "")
-    provider = model_config.get("provider", "openrouter")
+    # Support both new registry format (type/model_name) and legacy (provider/name)
+    model_name = model_config.get("model_name") or model_config.get("name", "")
+    provider = model_config.get("type") or model_config.get("provider", "openrouter")
 
-    if provider == "openai":
+    if provider in ("openai", "openai-compatible"):
         config_name = model_config.get("openai_config_name") or "OpenAI"
         return f"{model_name} ({config_name})"
     if provider == "openrouter":
@@ -38,42 +68,77 @@ def build_model_display_name(model_config: Dict[str, Any]) -> str:
         return f"{model_name} (Ollama)"
     return f"{model_name} ({provider})"
 
+def sanitize_model_options(model_config: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    Normalize the options dict for a model and validate known keys.
+
+    Returns a (options, error) tuple. The options dict is safe to pass to providers.
+    """
+    if not isinstance(model_config, dict):
+        return {}, None
+
+    raw_options = model_config.get("options")
+    if raw_options in (None, ""):
+        return {}, None
+    if not isinstance(raw_options, dict):
+        return {}, "Options must be an object/dictionary"
+
+    options = {k: v for k, v in raw_options.items() if v is not None}
+
+    if "num_ctx" in options:
+        try:
+            num_ctx_value = int(options["num_ctx"])
+        except (TypeError, ValueError):
+            return {}, "num_ctx must be a positive integer"
+        if num_ctx_value <= 0:
+            return {}, "num_ctx must be a positive integer"
+        options["num_ctx"] = num_ctx_value
+
+    return options, None
+
 
 async def query_models_parallel(
     model_configs: List[Dict[str, Any]],
-    providers_config: Dict[str, Any],
+    ollama_settings: Dict[str, Any],
     messages: List[Dict[str, str]],
     serialize_ollama: bool = False
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Query multiple models, each with their own provider.
-
-    When serialize_ollama is True, Ollama-backed models are processed one after
-    another to avoid GPU thrashing; non-Ollama models still run concurrently.
+    Query multiple models from the registry, each with their own provider.
+    
+    Args:
+        model_configs: List of model configs from registry (with id, type, model_name, etc.)
+        ollama_settings: Global Ollama settings
+        messages: Chat messages
+        serialize_ollama: Whether to serialize Ollama requests
     """
-    async def query_safe(model_config):
+    async def query_safe(model_config: Dict[str, Any]):
+        model_id = model_config.get("id", "unknown")
+        model_name = model_config.get("model_name", "")
+        model_label = model_config.get("label", model_name)
+        
         try:
-            provider = ProviderFactory.get_provider_for_model(model_config, providers_config)
-            response = await provider.query(model_config["name"], messages)
-            return {"response": response, "error": None}
+            provider = ProviderFactory.get_provider_from_model_config(model_config, ollama_settings)
+            response = await provider.query(model_name, messages)
+            return {"response": response, "error": None, "model_config": model_config}
         except Exception as e:
             error_message = str(e)
-            print(f"Error querying model {model_config.get('name')}: {error_message}")
-            return {"response": None, "error": error_message}
+            print(f"Error querying model {model_label}: {error_message}")
+            return {"response": None, "error": error_message, "model_config": model_config}
 
     result = {}
 
     def _store(model_config, response):
-        key = build_model_key(model_config)
-        result[key] = {
+        model_id = model_config.get("id", "unknown")
+        result[model_id] = {
             "response": response.get("response") if isinstance(response, dict) else None,
             "error": response.get("error") if isinstance(response, dict) else "Unknown error",
             "model_config": model_config
         }
 
     if serialize_ollama:
-        ollama_models = [mc for mc in model_configs if mc.get("provider") == "ollama"]
-        other_models = [mc for mc in model_configs if mc.get("provider") != "ollama"]
+        ollama_models = [mc for mc in model_configs if mc.get("type") == "ollama"]
+        other_models = [mc for mc in model_configs if mc.get("type") != "ollama"]
 
         if other_models:
             other_tasks = [query_safe(model_config) for model_config in other_models]
@@ -98,16 +163,20 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
     Stage 1: Collect individual responses from all council models.
     """
     config = config_manager.get_config()
-    providers_config = config.get("providers", {})
-    council_models = config.get("council_models", [])
-    serialize_ollama = config.get("serialize_local_models", False)
+    
+    # Resolve model IDs to full configs
+    council_model_ids = config.get("council_models", [])
+    council_models = resolve_model_configs_from_ids(council_model_ids, config)
+    
+    ollama_settings = config.get("ollama_settings", {})
+    serialize_ollama = ollama_settings.get("serialize_requests", False)
 
     messages = [{"role": "user", "content": user_query}]
 
     # Query all models in parallel (each with their own provider)
     responses = await query_models_parallel(
         council_models,
-        providers_config,
+        ollama_settings,
         messages,
         serialize_ollama=serialize_ollama
     )
@@ -117,10 +186,11 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
     total_cost = 0.0
     generation_ids = {}
     
-    for model_key, data in responses.items():
+    for model_id, data in responses.items():
         response = data.get("response")
         error = data.get("error")
         model_config = data.get("model_config", {})
+        model_label = model_config.get("label", model_id)
 
         if response is not None:
             # Extract cost and generation ID
@@ -136,14 +206,12 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
                 total_cost += model_cost
                 
                 if gen_id:
-                    generation_ids[f"stage1_{model_key}"] = gen_id
+                    generation_ids[f"stage1_{model_id}"] = gen_id
             
             stage1_results.append({
-                "model_id": model_key,
-                "model": model_config.get("name", model_key),
-                "model_display": build_model_display_name(model_config),
-                "provider": model_config.get("provider"),
-                "openai_config_name": model_config.get("openai_config_name"),
+                "model_id": model_id,
+                "model": model_config.get("model_name", model_id),
+                "model_display": model_label,
                 "response": response.get('content', ''),
                 "cost": model_cost,
                 "cost_status": cost_status,
@@ -151,11 +219,9 @@ async def stage1_collect_responses(user_query: str) -> Tuple[List[Dict[str, Any]
             })
         else:
             stage1_results.append({
-                "model_id": model_key,
-                "model": model_config.get("name", model_key),
-                "model_display": build_model_display_name(model_config),
-                "provider": model_config.get("provider"),
-                "openai_config_name": model_config.get("openai_config_name"),
+                "model_id": model_id,
+                "model": model_config.get("model_name", model_id),
+                "model_display": model_label,
                 "response": "",
                 "cost": 0.0,
                 "cost_status": "error",
@@ -173,9 +239,13 @@ async def stage2_collect_rankings(
     Stage 2: Each model ranks the anonymized responses.
     """
     config = config_manager.get_config()
-    providers_config = config.get("providers", {})
-    council_models = config.get("council_models", [])
-    serialize_ollama = config.get("serialize_local_models", False)
+    
+    # Resolve model IDs to full configs
+    council_model_ids = config.get("council_models", [])
+    council_models = resolve_model_configs_from_ids(council_model_ids, config)
+    
+    ollama_settings = config.get("ollama_settings", {})
+    serialize_ollama = ollama_settings.get("serialize_requests", False)
 
     valid_stage1_results = [result for result in stage1_results if not result.get("error")]
     if not valid_stage1_results:
@@ -240,7 +310,7 @@ Now provide your evaluation and ranking:"""
     # Get rankings from all council models in parallel
     responses = await query_models_parallel(
         council_models,
-        providers_config,
+        ollama_settings,
         messages,
         serialize_ollama=serialize_ollama
     )
@@ -315,11 +385,34 @@ async def stage3_synthesize_final(
     Stage 3: Chairman synthesizes final response.
     """
     config = config_manager.get_config()
-    providers_config = config.get("providers", {})
-    chairman_model_config = config.get("chairman_model", {})
-    chairman_model_name = chairman_model_config.get("name") if isinstance(chairman_model_config, dict) else chairman_model_config
-    chairman_model_id = build_model_key(chairman_model_config) if isinstance(chairman_model_config, dict) else chairman_model_name
-    chairman_model_display = build_model_display_name(chairman_model_config if isinstance(chairman_model_config, dict) else {"name": chairman_model_name})
+    ollama_settings = config.get("ollama_settings", {})
+    
+    # Resolve chairman model ID
+    chairman_model_id = config.get("chairman_model")
+    if not chairman_model_id:
+        return {
+            "model_id": "error",
+            "model": "error",
+            "model_display": "No chairman configured",
+            "response": "No chairman model configured. Please add a model and set it as chairman.",
+            "error": "No chairman model configured"
+        }, 0.0, {}
+    
+    models_registry = config.get("models", {})
+    chairman_config = models_registry.get(chairman_model_id)
+    if not chairman_config:
+        return {
+            "model_id": "error",
+            "model": "error",
+            "model_display": "Chairman not found",
+            "response": f"Chairman model {chairman_model_id} not found in registry.",
+            "error": "Chairman model not found"
+        }, 0.0, {}
+    
+    chairman_config = chairman_config.copy()
+    chairman_config["id"] = chairman_model_id
+    chairman_model_name = chairman_config.get("model_name", chairman_model_id)
+    chairman_model_label = chairman_config.get("label", chairman_model_name)
 
     # Build comprehensive context for chairman
     stage1_text = "\n\n".join([
@@ -334,7 +427,7 @@ async def stage3_synthesize_final(
         if not result.get("error")
     ])
 
-    chairman_prompt = f"""You are the Chairman of an LLM Council. Your job is to deliver the final response to the user.
+    chairman_prompt = f"""You are the Chairman of an LLM Council. Multiple AI models have provided responses to a user's question, and then ranked each other's responses. Your job is to deliver the final response to the user. 
 
 Original Question: {user_query}
 
@@ -350,14 +443,15 @@ Your response must:
 3. Explicitly mention supporting evidence or caveats the council surfaced, but use natural prose (e.g., "Some models noted...", "One perspective emphasized...").
 4. Conclude with a concise takeaway or recommendation when appropriate.
 
-Provide a single, comprehensive, accurate answer that stands on its own for the user:"""
+Provide a single, comprehensive, accurate answer that represents the council's collective wisdom:"""
 
     messages = [{"role": "user", "content": chairman_prompt}]
 
     # Query the chairman model with its specific provider
     error_message = None
+    response = None
     try:
-        provider = ProviderFactory.get_provider_for_model(chairman_model_config, providers_config)
+        provider = ProviderFactory.get_provider_from_model_config(chairman_config, ollama_settings)
         response = await provider.query(chairman_model_name, messages)
     except Exception as e:
         print(f"Error querying chairman model: {e}")
@@ -367,14 +461,16 @@ Provide a single, comprehensive, accurate answer that stands on its own for the 
     if response is None:
         fallback_message = "Error: Unable to generate final synthesis."
         if error_message:
-            fallback_message = f"{fallback_message} ({error_message})"
+            fallback_message += f" ({error_message})"
         # Fallback if chairman fails
         return {
             "model_id": chairman_model_id,
             "model": chairman_model_name,
-            "model_display": chairman_model_display,
+            "model_display": chairman_model_label,
             "response": fallback_message,
-            "error": error_message
+            "error": error_message or "Failed to generate synthesis",
+            "cost": 0.0,
+            "cost_status": "error"
         }, 0.0, {}
 
     # Extract cost and generation ID
@@ -395,7 +491,7 @@ Provide a single, comprehensive, accurate answer that stands on its own for the 
     return {
         "model_id": chairman_model_id,
         "model": chairman_model_name,
-        "model_display": chairman_model_display,
+        "model_display": chairman_model_label,
         "response": response.get('content', ''),
         "error": None,
         "cost": cost,
@@ -442,11 +538,30 @@ def calculate_aggregate_rankings(
     def _normalize_label(entry: Any) -> Tuple[str, str, str]:
         """Return (id, base_model, display_name) for a label entry."""
         if isinstance(entry, dict):
-            model_id = entry.get("id") or entry.get("model_id") or entry.get("model")
-            base_model = entry.get("model") or model_id
-            display = entry.get("model_display") or base_model or model_id
-            return model_id or display, base_model or display, display or base_model
-        return entry, entry, entry
+            # Helper to safely get string value
+            def get_str(key, default=None):
+                val = entry.get(key)
+                if isinstance(val, (str, int, float)):
+                    return str(val)
+                return default
+
+            model_id = get_str("id") or get_str("model_id") or get_str("model")
+            base_model = get_str("model") or model_id
+            display = get_str("model_display") or base_model or model_id
+            
+            # Fallback if everything is missing or invalid
+            if not model_id:
+                model_id = "unknown_model"
+            if not base_model:
+                base_model = "unknown_model"
+            if not display:
+                display = "Unknown Model"
+                
+            return model_id, base_model, display
+        
+        # If entry is not a dict, convert to string
+        entry_str = str(entry)
+        return entry_str, entry_str, entry_str
 
     # Track positions for each model (by id) and store display names
     model_positions = defaultdict(list)
@@ -487,26 +602,24 @@ def calculate_aggregate_rankings(
 
 async def generate_conversation_title(user_query: str) -> str:
     """
-    Generate a short title for a conversation based on the first user message.
+    Generate a short title for the conversation using the chairman model.
     """
     config = config_manager.get_config()
-    providers_config = config.get("providers", {})
+    ollama_settings = config.get("ollama_settings", {})
     
-    # Use the chairman model for title generation
-    chairman_model_config = config.get("chairman_model", {})
-    
-    # Handle both old and new formats
-    if isinstance(chairman_model_config, dict):
-        title_model_config = chairman_model_config
-        title_model_name = chairman_model_config.get("name", "")
-    else:
-        # Old format: chairman_model is a string
-        title_model_name = chairman_model_config
-        # Assume openrouter provider for legacy configs
-        title_model_config = {"name": title_model_name, "provider": "openrouter"}
-    
-    if not title_model_name:
+    # Resolve chairman model ID
+    chairman_model_id = config.get("chairman_model")
+    if not chairman_model_id:
         return "New Conversation"
+    
+    models_registry = config.get("models", {})
+    chairman_config = models_registry.get(chairman_model_id)
+    if not chairman_config:
+        return "New Conversation"
+    
+    chairman_config = chairman_config.copy()
+    chairman_config["id"] = chairman_model_id
+    chairman_model_name = chairman_config.get("model_name", chairman_model_id)
         
     title_prompt = f"""Generate a very short title (3-5 words maximum) that summarizes the following question.
 The title should be concise and descriptive. Do not use quotes or punctuation in the title.
@@ -518,8 +631,8 @@ Title:"""
     messages = [{"role": "user", "content": title_prompt}]
 
     try:
-        provider = ProviderFactory.get_provider_for_model(title_model_config, providers_config)
-        response = await provider.query(title_model_name, messages, timeout=30.0)
+        provider = ProviderFactory.get_provider_from_model_config(chairman_config, ollama_settings)
+        response = await provider.query(chairman_model_name, messages, timeout=30.0)
     except Exception as e:
         print(f"Error generating title: {e}")
         return "New Conversation"
@@ -534,7 +647,7 @@ Title:"""
 
     # Truncate if too long
     if len(title) > 50:
-        title = title[:47] + "..."
+        title = title[:47] + '...'
 
     return title
 
