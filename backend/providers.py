@@ -1,20 +1,120 @@
 """
 Model providers for LLM Council.
+
+OpenRouter uses a dedicated provider so we can attach its billing headers and
+usage polling, while Ollama (local) and OpenAI-compatible endpoints share the
+lighter OpenAI-style interface.
 """
 
 import abc
-import os
 import json
+import os
 import httpx
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, urlunparse
 from .openrouter import query_model as openrouter_query_model
+
+# Options that can be safely passed through to OpenAI-compatible chat completions
+OPENAI_COMPATIBLE_OPTION_KEYS = {
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+    "stop",
+    "logit_bias",
+    "seed",
+    "response_format",
+    "user",
+}
+
+
+def _filter_openai_options(options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Drop unknown keys before forwarding to OpenAI-style providers."""
+    if not isinstance(options, dict):
+        return {}
+    return {
+        key: value
+        for key, value in options.items()
+        if key in OPENAI_COMPATIBLE_OPTION_KEYS and value is not None
+    }
+
+
+def _running_in_docker() -> bool:
+    """Heuristic to detect container runtime for base URL rewrites."""
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "r", encoding="utf-8") as f:
+            content = f.read()
+            return "docker" in content or "containerd" in content
+    except OSError:
+        return False
+
+
+def _rewrite_localhost_base_url(base_url: str) -> str:
+    """
+    Map localhost URLs to host.docker.internal when running in Docker,
+    and back to 127.0.0.1 when running on the host but config contains host.docker.internal.
+    """
+    if not base_url:
+        return base_url
+
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port
+
+    if not host:
+        return base_url
+
+    is_docker = _running_in_docker()
+    new_host: Optional[str] = None
+
+    if host in {"localhost", "127.0.0.1"} and is_docker:
+        new_host = os.getenv("DOCKER_HOST_GATEWAY", "host.docker.internal")
+    elif host in {"host.docker.internal", "gateway.docker.internal"} and not is_docker:
+        new_host = "127.0.0.1"
+
+    if new_host is None:
+        return base_url
+
+    netloc = new_host
+    if port:
+        netloc = f"{new_host}:{port}"
+
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _normalize_openai_base_url(base_url: str) -> str:
+    """Ensure OpenAI-compatible base URLs include the expected /v1 prefix."""
+    base_url = _rewrite_localhost_base_url(base_url)
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+    parsed = urlparse(base_url)
+    path = parsed.path or ""
+    stripped_path = path.rstrip("/")
+
+    if stripped_path == "":
+        normalized_path = "/v1"
+    elif stripped_path.endswith("/v1"):
+        normalized_path = stripped_path
+    else:
+        normalized_path = f"{stripped_path}/v1"
+
+    return urlunparse(parsed._replace(path=normalized_path))
 
 
 class ModelProvider(abc.ABC):
     """Abstract base class for model providers."""
 
     @abc.abstractmethod
-    async def query(self, model: str, messages: List[Dict[str, str]], timeout: float = 120.0) -> Optional[Dict[str, Any]]:
+    async def query(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        timeout: float = 120.0,
+        options: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Query a model."""
         pass
 
@@ -24,18 +124,27 @@ class ModelProvider(abc.ABC):
         pass
 
 class OpenRouterProvider(ModelProvider):
-    """Provider for OpenRouter."""
+    """Provider for OpenRouter (kept separate for billing headers and usage polling)."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
-        # We might need to inject the key into the openrouter module or pass it explicitly
-        # For now, we'll assume the openrouter module uses the global config, 
-        # but ideally we should refactor openrouter.py to accept an api_key.
-        # Since I haven't refactored openrouter.py yet, I will do that next. 
-        pass
+        # Kept distinct from generic OpenAI-compatible because of special headers/cost polling.
 
-    async def query(self, model: str, messages: List[Dict[str, str]], timeout: float = 120.0) -> Optional[Dict[str, Any]]:
-        return await openrouter_query_model(model, messages, timeout, api_key=self.api_key)
+    async def query(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        timeout: float = 120.0,
+        options: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        safe_options = _filter_openai_options(options)
+        return await openrouter_query_model(
+            model,
+            messages,
+            timeout=timeout,
+            api_key=self.api_key,
+            extra_payload=safe_options if safe_options else None,
+        )
 
     async def list_models(self) -> List[str]:
         # OpenRouter has too many models to list effectively in a simple dropdown without search.
@@ -51,18 +160,43 @@ class OllamaProvider(ModelProvider):
         # Optional per-request options (e.g., num_ctx) to avoid overallocating KV cache
         self.options = options or {}
 
-    async def query(self, model: str, messages: List[Dict[str, str]], timeout: float = 120.0) -> Optional[Dict[str, Any]]:
+    async def query(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        timeout: float = 120.0,
+        options: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}/api/chat"
+        effective_options: Dict[str, Any] = {}
+        # Provider defaults form the baseline; model-specific options override them.
+        if self.options:
+            effective_options.update({k: v for k, v in self.options.items() if v is not None})
+        if options:
+            effective_options.update({k: v for k, v in options.items() if v is not None})
+
+        # Validate num_ctx early so we can return a user-friendly error.
+        if "num_ctx" in effective_options:
+            try:
+                num_ctx_value = int(effective_options["num_ctx"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Ollama num_ctx must be a positive integer") from exc
+            if num_ctx_value <= 0:
+                raise ValueError("Ollama num_ctx must be a positive integer")
+            effective_options["num_ctx"] = num_ctx_value
+
         payload = {
             "model": model,
             "messages": messages,
             "stream": False
         }
-        if self.options:
-            payload["options"] = {k: v for k, v in self.options.items() if v is not None}
+        if effective_options:
+            payload["options"] = effective_options
         
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            timeout_obj = httpx.Timeout(timeout, connect=30.0)
+            limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+            async with httpx.AsyncClient(timeout=timeout_obj, limits=limits) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 data = response.json()
@@ -121,20 +255,31 @@ class OpenAIProvider(ModelProvider):
 
     def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1"):
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _normalize_openai_base_url(base_url)
 
-    async def query(self, model: str, messages: List[Dict[str, str]], timeout: float = 120.0) -> Optional[Dict[str, Any]]:
+    async def query(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        timeout: float = 120.0,
+        options: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        safe_options = _filter_openai_options(options)
         payload = {
             "model": model,
             "messages": messages
         }
+        if safe_options:
+            payload.update(safe_options)
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            timeout_obj = httpx.Timeout(timeout, connect=30.0)
+            limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+            async with httpx.AsyncClient(timeout=timeout_obj, limits=limits) as client:
                 response = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
@@ -200,9 +345,56 @@ class ProviderFactory:
     _provider_cache: Dict[str, ModelProvider] = {}
     
     @staticmethod
+    def get_provider_from_model_config(model_config: Dict[str, Any], ollama_settings: Dict[str, Any] = None) -> ModelProvider:
+        """
+        Create a provider instance from a model registry entry.
+        
+        Args:
+            model_config: Model configuration from registry with keys: type, model_name, base_url, api_key
+            ollama_settings: Global Ollama settings (num_ctx, serialize_requests)
+        
+        Returns:
+            Configured ModelProvider instance
+        """
+        model_type = model_config.get("type", "ollama")
+        api_key = model_config.get("api_key", "")
+        base_url = model_config.get("base_url", "")
+
+        if model_type == "ollama":
+            base_url = _rewrite_localhost_base_url(base_url or "http://localhost:11434")
+        elif model_type == "openai-compatible":
+            base_url = _normalize_openai_base_url(base_url or "https://api.openai.com/v1")
+        
+        # Create cache key based on model config
+        cache_key = f"{model_type}::{base_url}::{api_key[:10] if api_key else ''}"
+        
+        if cache_key in ProviderFactory._provider_cache:
+            return ProviderFactory._provider_cache[cache_key]
+        
+        # Create provider based on type
+        if model_type == "ollama":
+            num_ctx = None
+            if ollama_settings:
+                num_ctx = ollama_settings.get("num_ctx")
+            provider = OllamaProvider(
+                base_url=base_url,
+                options={"num_ctx": num_ctx} if num_ctx else None
+            )
+        elif model_type == "openrouter":
+            provider = OpenRouterProvider(api_key=api_key)
+        elif model_type == "openai-compatible":
+            provider = OpenAIProvider(api_key=api_key, base_url=base_url)
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+        
+        ProviderFactory._provider_cache[cache_key] = provider
+        return provider
+    
+    @staticmethod
     def get_provider_for_model(model_config: Dict[str, Any], providers_config: Dict[str, Any]) -> ModelProvider:
         """
-        Get the appropriate provider for a specific model configuration.
+        LEGACY: Get the appropriate provider for a specific model configuration.
+        This is kept for backward compatibility during migration.
         
         Args:
             model_config: Dict with 'name', 'provider', and optional 'openai_config_name' keys
@@ -242,16 +434,17 @@ class ProviderFactory:
             
             if cache_key in ProviderFactory._provider_cache:
                 return ProviderFactory._provider_cache[cache_key]
-                
+            
             provider = OpenAIProvider(
                 api_key=selected_config.get("api_key", ""),
-                base_url=selected_config.get("base_url", "https://api.openai.com/v1")
+                base_url=_normalize_openai_base_url(selected_config.get("base_url", "https://api.openai.com/v1"))
             )
             ProviderFactory._provider_cache[cache_key] = provider
             return provider
 
         # Standard handling for other providers
         provider_config = providers_config.get(provider_name, {})
+        # Cache providers by base configuration; per-model options are applied at query-time.
         cache_key = f"{provider_name}:{json.dumps(provider_config, sort_keys=True)}"
         
         # Return cached provider if available
@@ -261,7 +454,7 @@ class ProviderFactory:
         # Create new provider instance
         if provider_name == "ollama":
             provider = OllamaProvider(
-                base_url=provider_config.get("base_url", "http://localhost:11434"),
+                base_url=_rewrite_localhost_base_url(provider_config.get("base_url", "http://localhost:11434")),
                 options={"num_ctx": provider_config.get("num_ctx")}
             )
         elif provider_name == "openrouter":
@@ -276,7 +469,7 @@ class ProviderFactory:
     @staticmethod
     def get_all_providers(providers_config: Dict[str, Any]) -> Dict[str, ModelProvider]:
         """
-        Get all configured providers.
+        LEGACY: Get all configured providers.
         
         Args:
             providers_config: Dict with provider configurations
@@ -289,7 +482,7 @@ class ProviderFactory:
         # Ollama
         if "ollama" in providers_config:
             providers["ollama"] = OllamaProvider(
-                base_url=providers_config["ollama"].get("base_url", "http://localhost:11434"),
+                base_url=_rewrite_localhost_base_url(providers_config["ollama"].get("base_url", "http://localhost:11434")),
                 options={"num_ctx": providers_config["ollama"].get("num_ctx")}
             )
         
@@ -313,30 +506,11 @@ class ProviderFactory:
                     key = f"openai:{name}"
                     providers[key] = OpenAIProvider(
                         api_key=config["api_key"],
-                        base_url=config.get("base_url", "https://api.openai.com/v1")
+                        base_url=_normalize_openai_base_url(config.get("base_url", "https://api.openai.com/v1"))
                     )
         
         return providers
     
-    @staticmethod
-    def get_provider(config: Dict[str, Any]) -> ModelProvider:
-        """
-        Legacy method for backward compatibility.
-        Gets a single provider based on old config format.
-        """
-        provider_type = config.get("provider", "openrouter")
-        
-        if provider_type == "ollama":
-            return OllamaProvider(base_url=config.get("ollama_base_url", "http://localhost:11434"))
-        elif provider_type == "openai":
-            return OpenAIProvider(
-                api_key=config.get("openai_api_key", ""),
-                base_url=config.get("openai_base_url", "https://api.openai.com/v1")
-            )
-        else:
-            # Default to OpenRouter
-            return OpenRouterProvider(api_key=config.get("openrouter_api_key", ""))
-
     @staticmethod
     def clear_cache():
         """Reset cached provider instances (used when credentials/configs change)."""
